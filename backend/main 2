@@ -1,0 +1,213 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List
+import itertools
+import random
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from scipy import stats
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class Factor(BaseModel):
+    name: str
+    min: float
+    max: float
+    unit: str
+
+class FactorsInput(BaseModel):
+    temp: Factor
+    pressure: Factor
+    time: Factor
+
+class RunData(BaseModel):
+    id: int
+    runOrder: int
+    temp: float
+    pressure: float
+    time: float
+    yieldVal: float
+
+@app.post("/api/design/generate")
+def generate_design(factors: FactorsInput):
+    # 2^3 full factorial with 2 replicates (16) + 4 center points = 20 runs
+    corners = list(itertools.product([-1, 1], repeat=3))
+
+    matrix = []
+    for _ in range(2):
+        for corner in corners:
+            matrix.append(corner)
+    for _ in range(4):
+        matrix.append((0, 0, 0))
+
+    random.shuffle(matrix)
+
+    runs = []
+    for idx, row in enumerate(matrix):
+        c_temp, c_press, c_time = row
+
+        def scale(c, f):
+            if c == -1: return f.min
+            if c == 1: return f.max
+            return (f.min + f.max) / 2.0
+
+        runs.append({
+            "id": idx + 1,
+            "runOrder": idx + 1,
+            "temp": round(scale(c_temp, factors.temp), 2),
+            "pressure": round(scale(c_press, factors.pressure), 2),
+            "time": round(scale(c_time, factors.time), 2),
+            "yieldVal": ""
+        })
+
+    return {"runs": runs}
+
+
+def gen_diagnosis(tvalues: dict, pvalues: dict, params: dict,
+                  yield_gain: float, optimal_yield: float, current_avg: float) -> str:
+    """회귀 결과 기반 AI 한줄 진단 문장 자동 생성 (영문 인자명 — 프론트에서 한글 치환)"""
+    main_factors = ['Temp', 'Pressure', 'Time']
+    available = [f for f in main_factors if f in tvalues and not (tvalues[f] != tvalues[f])]
+    if not available:
+        return "분석 결과가 부족합니다. 데이터를 확인해주세요."
+
+    top = max(available, key=lambda f: abs(tvalues[f]))
+    t_abs = abs(tvalues[top])
+    p_val = pvalues.get(top, 1.0)
+    p_str = "p<0.001" if p_val < 0.001 else f"p={p_val:.3f}"
+    direction = "높이면" if params.get(top, 0) > 0 else "낮추면"
+
+    sig_main = [f for f in available if pvalues.get(f, 1.0) < 0.05]
+    inter_sig = [k for k, p in pvalues.items() if '*' in k and p < 0.05]
+
+    parts = [
+        f"{top}(t={t_abs:.1f}, {p_str})이(가) 수율에 가장 큰 영향 — {direction} 수율↑.",
+        f"최적 조건 적용 시 {current_avg:.1f}% → {optimal_yield:.1f}%(+{yield_gain:.1f}%p) 달성 예상."
+    ]
+    if inter_sig:
+        parts.append(f"교호작용({', '.join(inter_sig)}) 유의 — 단독 인자 조정만으로 한계.")
+    if not sig_main:
+        parts.append("유의 주효과 없음 — 실험 범위·측정 정밀도 재검토 권장.")
+
+    return " | ".join(parts)
+
+
+@app.post("/api/analyze")
+def analyze_data(runs: List[RunData]):
+    data = {"temp": [], "pressure": [], "time": [], "yieldVal": []}
+    for r in runs:
+        data["temp"].append(r.temp)
+        data["pressure"].append(r.pressure)
+        data["time"].append(r.time)
+        data["yieldVal"].append(r.yieldVal)
+
+    df = pd.DataFrame(data)
+
+    def min_max_scale(col):
+        _min, _max = col.min(), col.max()
+        if _min == _max: return col * 0
+        return -1 + 2 * (col - _min) / (_max - _min)
+
+    df['X1'] = min_max_scale(df['temp'])
+    df['X2'] = min_max_scale(df['pressure'])
+    df['X3'] = min_max_scale(df['time'])
+    df['X1X2'] = df['X1'] * df['X2']
+    df['X1X3'] = df['X1'] * df['X3']
+    df['X2X3'] = df['X2'] * df['X3']
+
+    X = df[['X1', 'X2', 'X3', 'X1X2', 'X1X3', 'X2X3']]
+    X = sm.add_constant(X)
+    Y = df['yieldVal']
+
+    model = sm.OLS(Y, X).fit()
+
+    names = ["Temp", "Pressure", "Time", "Temp*Press", "Temp*Time", "Press*Time"]
+    tvalues = dict(zip(names, model.tvalues[1:]))
+    pvalues = dict(zip(names, model.pvalues[1:]))
+    params = dict(zip(names, model.params[1:]))
+    r_squared = float(model.rsquared) if not np.isnan(model.rsquared) else 0.0
+    intercept = float(model.params.iloc[0]) if not np.isnan(model.params.iloc[0]) else 0.0
+
+    # ── Golden Solution ────────────────────────────────────────────────────────
+    golden = {
+        "temp_level": 1 if params.get("Temp", 0) > 0 else -1,
+        "pressure_level": 1 if params.get("Pressure", 0) > 0 else -1,
+        "time_level": 1 if params.get("Time", 0) > 0 else -1,
+    }
+
+    # ── ① 정규 확률도 데이터 (scipy normal quantiles) ─────────────────────────
+    residuals_list = model.resid.tolist()
+    sorted_resids = sorted(residuals_list)
+    n = len(sorted_resids)
+    theoretical_quantiles = [
+        float(stats.norm.ppf((i + 0.5) / n)) for i in range(n)
+    ]
+
+    # ── ② 교호작용도 데이터 (Temp × Pressure, Time 중앙 고정) ────────────────
+    def predict(x1, x2, x3):
+        return (
+            intercept
+            + params.get("Temp", 0) * x1
+            + params.get("Pressure", 0) * x2
+            + params.get("Time", 0) * x3
+            + params.get("Temp*Press", 0) * x1 * x2
+            + params.get("Temp*Time", 0) * x1 * x3
+            + params.get("Press*Time", 0) * x2 * x3
+        )
+
+    interaction_data = {
+        "x1_coded": [-1, 1],
+        "y_b_low":  [round(predict(-1, -1, 0), 4), round(predict(1, -1, 0), 4)],
+        "y_b_high": [round(predict(-1,  1, 0), 4), round(predict(1,  1, 0), 4)],
+    }
+
+    # ── ③ 최적해 수율 예측 & ROI 계산 ─────────────────────────────────────────
+    g = golden
+    optimal_yield_pred = predict(g["temp_level"], g["pressure_level"], g["time_level"])
+    current_avg_yield  = float(df['yieldVal'].mean())
+    yield_gain         = max(0.0, optimal_yield_pred - current_avg_yield)
+
+    # ROI: 연 50억 생산가치 기준, 불량비용 5%, yield_gain에 따른 불량 감소분
+    ROI_BASE           = 5_000_000_000   # 50억 연매출 기준
+    DEFECT_COST_RATIO  = 0.05            # 불량 비용 비율 5%
+    roi_amount         = int(ROI_BASE * DEFECT_COST_RATIO * (yield_gain / 100))
+
+    # ── ④ AI 한줄 진단 ────────────────────────────────────────────────────────
+    ai_diag = gen_diagnosis(
+        tvalues, pvalues, params,
+        round(yield_gain, 2),
+        round(optimal_yield_pred, 2),
+        round(current_avg_yield, 2)
+    )
+
+    return {
+        # ─ 기존 회귀 결과 ─────────────────────────────────────────────────────
+        "r_squared":      round(r_squared, 4),
+        "intercept":      round(intercept, 4),
+        "tvalues":        {k: round(float(v), 4) for k, v in tvalues.items() if not np.isnan(v)},
+        "pvalues":        {k: round(float(v), 4) for k, v in pvalues.items() if not np.isnan(v)},
+        "params":         {k: round(float(v), 4) for k, v in params.items() if not np.isnan(v)},
+        "golden_solution": golden,
+        # ─ ① 정규 확률도 ──────────────────────────────────────────────────────
+        "norm_plot_x":    [round(q, 4) for q in theoretical_quantiles],
+        "norm_plot_y":    [round(r, 4) for r in sorted_resids],
+        # ─ ② 교호작용도 ──────────────────────────────────────────────────────
+        "interaction_data": interaction_data,
+        # ─ ③ 최적 수율 & ROI ─────────────────────────────────────────────────
+        "optimal_yield_pred": round(optimal_yield_pred, 2),
+        "current_avg_yield":  round(current_avg_yield, 2),
+        "yield_gain":         round(yield_gain, 2),
+        "roi_amount":         roi_amount,
+        # ─ ④ AI 진단 (프론트에서 한글 인자명으로 치환) ──────────────────────────
+        "ai_diagnosis":   ai_diag,
+    }

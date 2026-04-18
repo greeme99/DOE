@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+statsmodels
+scipy
+numpy
+# DB 연동
+supabase
+# 배포용
+gunicorn
+python-multipart
+python-dotenv
