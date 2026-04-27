@@ -2,8 +2,9 @@ try:
     from dotenv import load_dotenv; load_dotenv()
 except ImportError:
     pass
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 import itertools, random, os
@@ -13,10 +14,25 @@ import statsmodels.api as sm
 from scipy import stats
 
 app = FastAPI(title="DOE Auto API", version="2.0")
+auth_scheme = HTTPBearer()
 
-# ─── CORS (환경변수로 허용 오리진 관리) ──────────────────────────────────────
-_raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
-ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",")] if _raw_origins != "*" else ["*"]
+def _require_db():
+    if sb is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+async def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
+    _require_db()
+    try:
+        user_res = sb.auth.get_user(token.credentials)
+        if not user_res.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return user_res.user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+
+# ─── CORS (보안 강화를 위해 특정 오리진만 허용) ─────────────────────────────
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -39,7 +55,7 @@ if _sb_url and _sb_key:
 else:
     print("[Supabase] 환경변수 없음 — DB 기능 비활성화 (로컬 모드)")
 
-# ─── Pydantic Models ──────────────────────────────────────────────────────────
+# ─── Pydantic Models (Strict Validation) ──────────────────────────────────────
 
 class FactorItem(BaseModel):
     key: str
@@ -52,14 +68,51 @@ class FactorsRequest(BaseModel):
     factors: List[FactorItem]
 
 class RunItem(BaseModel):
-    id: int
+    id: Optional[int] = None
     runOrder: int
     factor_values: Dict[str, float]
-    yieldVal: float
+    yieldVal: Any # Empty string or float
 
 class AnalyzeRequest(BaseModel):
     runs: List[RunItem]
     factors: List[FactorItem]
+
+class AnalysisResultModel(BaseModel):
+    r_squared: float
+    intercept: float
+    params_raw: Dict[str, float]
+    tvalues: Dict[str, float]
+    pvalues: Dict[str, float]
+    factor_keys: List[str]
+    factor_names: Dict[str, str]
+    golden_solution: Dict[str, float]
+    optimal_yield_pred: float
+    current_avg_yield: float
+    yield_gain: float
+    roi_amount: int
+    ai_diagnosis: str
+    norm_plot_x: List[float]
+    norm_plot_y: List[float]
+    interaction_data: Dict[str, Any]
+
+class VerifyRunItem(BaseModel):
+    id: int
+    yieldVal: Any # Empty string or float
+
+class ProjectSaveRequest(BaseModel):
+    name: str
+    industry: str = "사출성형"
+    factors: List[FactorItem] = []
+    runs: List[RunItem] = []
+    analysis_result: Optional[AnalysisResultModel] = None
+    verify_runs: List[VerifyRunItem] = []
+
+class ProjectUpdateRequest(ProjectSaveRequest):
+    status: str = "completed"
+
+# ─── ROI Constants ────────────────────────────────────────────────────────────
+ROI_BASE_REVENUE = 5_000_000_000  # 50억 (기본값)
+ROI_IMPROVEMENT_RATIO = 0.05      # 5% (기본값)
 
 # ─── Design generation ────────────────────────────────────────────────────────
 
@@ -112,6 +165,7 @@ def gen_diagnosis(tvalues, pvalues, params, yield_gain, opt_yield, cur_avg, name
     top_name  = name_map.get(top, top)
     inter_sig = [k for k, p in pvalues.items() if '*' in k and p < 0.05]
     sig_main  = [k for k in main_keys if pvalues.get(k, 1.0) < 0.05]
+    sig_quad  = [k for k, p in pvalues.items() if '^2' in k and p < 0.05]
 
     parts = [
         f"{top_name}(t={t_abs:.1f}, {p_str})이(가) 수율에 가장 큰 영향 — {direction} 수율↑.",
@@ -119,7 +173,10 @@ def gen_diagnosis(tvalues, pvalues, params, yield_gain, opt_yield, cur_avg, name
     ]
     if inter_sig:
         names = [' × '.join(name_map.get(p, p) for p in k.split('*')) for k in inter_sig]
-        parts.append(f"교호작용({', '.join(names)}) 유의 — 단독 인자 조정만으로는 한계.")
+        parts.append(f"교호작용({', '.join(names)}) 유의 — 단순 선형 모델로는 한계.")
+    if sig_quad:
+        q_names = [name_map.get(k.replace('^2',''), k.replace('^2','')) for k in sig_quad]
+        parts.append(f"곡선 관계(Curvature, {', '.join(q_names)}) 감지 — 중심점 부근에서 극대/극소점 존재 가능성.")
     if not sig_main:
         parts.append("유의 주효과 없음 — 실험 범위·측정 정밀도 재검토 권장.")
     return " | ".join(parts)
@@ -141,8 +198,15 @@ def analyze_data(req: AnalyzeRequest):
 
     coded = pd.DataFrame({k: scale(df[k]) for k in fkeys})
 
-    # 주효과 + 2-way 교호작용 컬럼 생성
+    # 주효과 + 2-way 교호작용 + 제곱항(Quadratic) 컬럼 생성
     effect_cols = list(fkeys)
+    # 제곱항 추가 (RSM)
+    for k in fkeys:
+        nm_sq = f"{k}^2"
+        coded[nm_sq] = coded[k] ** 2
+        effect_cols.append(nm_sq)
+
+    # 교호작용 추가
     for i, ki in enumerate(fkeys):
         for j, kj in enumerate(fkeys):
             if j > i:
@@ -165,13 +229,18 @@ def analyze_data(req: AnalyzeRequest):
     r_sq      = float(model.rsquared) if not np.isnan(model.rsquared) else 0.0
     intercept = float(model.params.iloc[0]) if not np.isnan(model.params.iloc[0]) else 0.0
 
-    # Golden solution
+    # Golden solution (RSM에서는 단순 부호 판별이 아니라 최적점 탐색이 필요하지만, 여기선 기본 구현 유지 후 프론트에서 시뮬레이션 지원)
     golden = {k: (1 if params.get(k, 0) > 0 else -1) for k in fkeys}
 
     def predict_coded(cv):
         pred = intercept
+        # 주효과
         for k in fkeys:
             pred += params.get(k, 0) * cv.get(k, 0)
+        # 제곱항
+        for k in fkeys:
+            pred += params.get(f"{k}^2", 0) * (cv.get(k, 0) ** 2)
+        # 교호작용
         for i, ki in enumerate(fkeys):
             for j, kj in enumerate(fkeys):
                 if j > i:
@@ -181,7 +250,7 @@ def analyze_data(req: AnalyzeRequest):
     opt_yield  = predict_coded(golden)
     cur_avg    = float(df["yieldVal"].mean())
     yield_gain = max(0.0, opt_yield - cur_avg)
-    roi_amount = int(5_000_000_000 * 0.05 * (yield_gain / 100))
+    roi_amount = int(ROI_BASE_REVENUE * ROI_IMPROVEMENT_RATIO * (yield_gain / 100))
 
     # Normal probability plot
     resids = sorted(model.resid.tolist())
@@ -205,7 +274,12 @@ def analyze_data(req: AnalyzeRequest):
 
     # 한글 표시명 변환
     def disp(col):
-        return ' × '.join(fnames.get(p, p) for p in col.split('*')) if '*' in col else fnames.get(col, col)
+        if '^2' in col:
+            base = col.replace('^2', '')
+            return f"{fnames.get(base, base)}²"
+        if '*' in col:
+            return ' × '.join(fnames.get(p, p) for p in col.split('*'))
+        return fnames.get(col, col)
 
     ai_diag = gen_diagnosis(
         tvalues, pvalues, params,
@@ -231,52 +305,44 @@ def analyze_data(req: AnalyzeRequest):
         "yield_gain":         round(yield_gain, 2),
         "roi_amount":         roi_amount,
         "ai_diagnosis":       ai_diag,
+        # 진단용 차트 데이터 추가
+        "residuals":          [round(float(r), 4) for r in model.resid.tolist()],
+        "fitted_values":      [round(float(v), 4) for v in model.fittedvalues.tolist()],
+        "actual_values":      [round(float(v), 4) for v in Y.tolist()],
+        "std_residuals":      [round(float(r), 4) for r in (model.resid / (np.std(model.resid) or 1.0)).tolist()]
     }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROJECT CRUD API (Supabase 연동)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _require_db():
-    if sb is None:
-        raise HTTPException(
-            status_code=503,
-            detail="DB 미연결 — SUPABASE_URL / SUPABASE_SERVICE_KEY 환경변수를 설정해주세요."
-        )
-
-# ─── Pydantic models for project CRUD ────────────────────────────────────────
-
-class ProjectSaveRequest(BaseModel):
-    name: str
-    industry: str = "사출성형"
-    factors: List[Dict[str, Any]] = []
-    runs: List[Dict[str, Any]] = []
-    analysis_result: Optional[Dict[str, Any]] = None
-    verify_runs: List[Dict[str, Any]] = []
-
-class ProjectUpdateRequest(ProjectSaveRequest):
-    status: str = "in_progress"
+# ─── API Endpoints — Project CRUD ────────────────────────────────────────────
 
 # ─── POST /api/projects — 새 프로젝트 저장 ───────────────────────────────────
 
 @app.post("/api/projects")
-def create_project(req: ProjectSaveRequest):
+async def save_project(
+    req: ProjectSaveRequest, 
+    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    user: dict = Depends(get_current_user)
+):
     _require_db()
+    # 사용자의 토큰을 DB 클라이언트에 연동하여 RLS 통과
+    sb.postgrest.auth(token.credentials)
+    
     try:
-        # 1. projects 레코드 생성
-        proj = sb.table("projects").insert({
+        # 1. Project 저장
+        proj_data = {
             "name": req.name,
             "industry": req.industry,
-            "status": "in_progress",
-        }).execute()
-        project_id = proj.data[0]["id"]
+            "status": "completed",
+            "user_id": user.id
+        }
+        res = sb.table("projects").insert(proj_data).execute()
+        project_id = res.data[0]["id"]
 
         # 2. factors 저장
         if req.factors:
             fac_rows = [
-                {"project_id": project_id, "key": f["key"], "name": f["name"],
-                 "min": float(f["min"]), "max": float(f["max"]),
-                 "unit": f.get("unit", ""), "sort_order": i}
+                {"project_id": project_id, "key": f.key, "name": f.name,
+                 "min": f.min, "max": f.max,
+                 "unit": f.unit, "sort_order": i}
                 for i, f in enumerate(req.factors)
             ]
             sb.table("factors").insert(fac_rows).execute()
@@ -284,42 +350,27 @@ def create_project(req: ProjectSaveRequest):
         # 3. runs 저장
         if req.runs:
             run_rows = [
-                {"project_id": project_id, "run_order": r.get("runOrder", i+1),
-                 "factor_values": r.get("factor_values", {}),
-                 "yield_val": float(r["yieldVal"]) if r.get("yieldVal") not in ("", None) else None}
+                {"project_id": project_id, "run_order": r.runOrder,
+                 "factor_values": r.factor_values,
+                 "yield_val": float(r.yieldVal) if r.yieldVal not in ("", None) else None}
                 for i, r in enumerate(req.runs)
             ]
             sb.table("runs").insert(run_rows).execute()
 
         # 4. analysis_result 저장
         if req.analysis_result:
-            ar = req.analysis_result
+            ar_data = req.analysis_result.dict()
             sb.table("results").upsert({
                 "project_id": project_id,
-                "r_squared": ar.get("r_squared"),
-                "intercept": ar.get("intercept"),
-                "params_raw": ar.get("params_raw", {}),
-                "tvalues": ar.get("tvalues", {}),
-                "pvalues": ar.get("pvalues", {}),
-                "factor_keys": ar.get("factor_keys", []),
-                "factor_names": ar.get("factor_names", {}),
-                "golden_solution": ar.get("golden_solution", {}),
-                "optimal_yield_pred": ar.get("optimal_yield_pred"),
-                "current_avg_yield": ar.get("current_avg_yield"),
-                "yield_gain": ar.get("yield_gain"),
-                "roi_amount": ar.get("roi_amount"),
-                "ai_diagnosis": ar.get("ai_diagnosis", ""),
-                "norm_plot_x": ar.get("norm_plot_x", []),
-                "norm_plot_y": ar.get("norm_plot_y", []),
-                "interaction_data": ar.get("interaction_data", {}),
+                **ar_data
             }).execute()
 
         # 5. verify_runs 저장
         if req.verify_runs:
             vr_rows = [
-                {"project_id": project_id, "run_order": i+1,
-                 "yield_val": float(v["yieldVal"]) if v.get("yieldVal") not in ("", None) else None}
-                for i, v in enumerate(req.verify_runs)
+                {"project_id": project_id, "run_order": v.id,
+                 "yield_val": float(v.yieldVal) if v.yieldVal not in ("", None) else None}
+                for v in req.verify_runs
             ]
             sb.table("verify_runs").insert(vr_rows).execute()
 
@@ -328,132 +379,131 @@ def create_project(req: ProjectSaveRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB 저장 오류: {str(e)}")
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"SAVE ERROR DETAIL:\n{error_detail}")
+        raise HTTPException(status_code=500, detail=f"Database save error: {str(e)}")
 
 
 # ─── PUT /api/projects/{id} — 기존 프로젝트 업데이트 ─────────────────────────
 
-@app.put("/api/projects/{project_id}")
-def update_project(project_id: str, req: ProjectUpdateRequest):
+@app.put("/api/projects/{id}")
+async def update_project(
+    id: int, 
+    req: ProjectUpdateRequest, 
+    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    user: dict = Depends(get_current_user)
+):
     _require_db()
+    sb.postgrest.auth(token.credentials)
     try:
-        # 존재 확인
-        existing = sb.table("projects").select("id").eq("id", project_id).execute()
+        # 존재 확인 및 소유권 검증
+        existing = sb.table("projects").select("id").eq("id", id).eq("user_id", user.id).execute()
         if not existing.data:
-            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없거나 권한이 없습니다.")
 
         # projects 메타 업데이트
         sb.table("projects").update({
             "name": req.name, "industry": req.industry, "status": req.status
-        }).eq("id", project_id).execute()
+        }).eq("id", id).execute()
 
         # 기존 하위 데이터 삭제 후 재삽입
-        sb.table("factors").delete().eq("project_id", project_id).execute()
-        sb.table("runs").delete().eq("project_id", project_id).execute()
-        sb.table("verify_runs").delete().eq("project_id", project_id).execute()
+        sb.table("factors").delete().eq("project_id", id).execute()
+        sb.table("runs").delete().eq("project_id", id).execute()
+        sb.table("verify_runs").delete().eq("project_id", id).execute()
 
         if req.factors:
             sb.table("factors").insert([
-                {"project_id": project_id, "key": f["key"], "name": f["name"],
-                 "min": float(f["min"]), "max": float(f["max"]),
-                 "unit": f.get("unit", ""), "sort_order": i}
+                {"project_id": id, "key": f.key, "name": f.name,
+                 "min": f.min, "max": f.max,
+                 "unit": f.unit, "sort_order": i}
                 for i, f in enumerate(req.factors)
             ]).execute()
 
         if req.runs:
             sb.table("runs").insert([
-                {"project_id": project_id, "run_order": r.get("runOrder", i+1),
-                 "factor_values": r.get("factor_values", {}),
-                 "yield_val": float(r["yieldVal"]) if r.get("yieldVal") not in ("", None) else None}
+                {"project_id": id, "run_order": r.runOrder,
+                 "factor_values": r.factor_values,
+                 "yield_val": float(r.yieldVal) if r.yieldVal not in ("", None) else None}
                 for i, r in enumerate(req.runs)
             ]).execute()
 
         if req.analysis_result:
-            ar = req.analysis_result
+            ar_data = req.analysis_result.dict()
             sb.table("results").upsert({
-                "project_id": project_id,
-                "r_squared": ar.get("r_squared"),
-                "intercept": ar.get("intercept"),
-                "params_raw": ar.get("params_raw", {}),
-                "tvalues": ar.get("tvalues", {}),
-                "pvalues": ar.get("pvalues", {}),
-                "factor_keys": ar.get("factor_keys", []),
-                "factor_names": ar.get("factor_names", {}),
-                "golden_solution": ar.get("golden_solution", {}),
-                "optimal_yield_pred": ar.get("optimal_yield_pred"),
-                "current_avg_yield": ar.get("current_avg_yield"),
-                "yield_gain": ar.get("yield_gain"),
-                "roi_amount": ar.get("roi_amount"),
-                "ai_diagnosis": ar.get("ai_diagnosis", ""),
-                "norm_plot_x": ar.get("norm_plot_x", []),
-                "norm_plot_y": ar.get("norm_plot_y", []),
-                "interaction_data": ar.get("interaction_data", {}),
+                "project_id": id,
+                **ar_data
             }).execute()
 
         if req.verify_runs:
             sb.table("verify_runs").insert([
-                {"project_id": project_id, "run_order": i+1,
-                 "yield_val": float(v["yieldVal"]) if v.get("yieldVal") not in ("", None) else None}
+                {"project_id": id, "run_order": i+1,
+                 "yield_val": float(v.yieldVal) if v.yieldVal not in ("", None) else None}
                 for i, v in enumerate(req.verify_runs)
             ]).execute()
 
-        return {"id": project_id, "message": "프로젝트 업데이트 완료"}
+        return {"id": id, "message": "프로젝트 업데이트 완료"}
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB 업데이트 오류: {str(e)}")
+        print(f"DB 업데이트 오류: {e}")
+        raise HTTPException(status_code=500, detail="프로젝트를 업데이트하는 중 오류가 발생했습니다.")
 
 
 # ─── GET /api/projects — 프로젝트 목록 ───────────────────────────────────────
 
 @app.get("/api/projects")
-def list_projects():
+async def list_projects(
+    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    user: dict = Depends(get_current_user)
+):
     _require_db()
+    sb.postgrest.auth(token.credentials)
     try:
-        res = sb.table("projects")\
-            .select("id, name, industry, status, created_at, updated_at")\
-            .order("updated_at", desc=True)\
-            .limit(50)\
-            .execute()
+        res = sb.table("projects").select("*").eq("user_id", user.id).order("created_at", desc=True).execute()
         return {"projects": res.data}
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"목록 조회 오류: {str(e)}")
+        print(f"목록 조회 오류: {e}")
+        raise HTTPException(status_code=500, detail="프로젝트 목록을 불러오는 중 오류가 발생했습니다.")
 
 
 # ─── GET /api/projects/{id} — 프로젝트 상세 (전체 데이터) ────────────────────
 
-@app.get("/api/projects/{project_id}")
-def get_project(project_id: str):
+@app.get("/api/projects/{id}")
+async def get_project(
+    id: str, 
+    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    user: dict = Depends(get_current_user)
+):
     _require_db()
+    sb.postgrest.auth(token.credentials)
     try:
-        proj = sb.table("projects").select("*").eq("id", project_id).execute()
+        proj = sb.table("projects").select("*").eq("id", id).eq("user_id", user.id).execute()
         if not proj.data:
-            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없거나 권한이 없습니다.")
 
         factors_res = sb.table("factors")\
             .select("key, name, min, max, unit, sort_order")\
-            .eq("project_id", project_id)\
+            .eq("project_id", id)\
             .order("sort_order")\
             .execute()
 
         runs_res = sb.table("runs")\
             .select("run_order, factor_values, yield_val")\
-            .eq("project_id", project_id)\
+            .eq("project_id", id)\
             .order("run_order")\
             .execute()
 
         results_res = sb.table("results")\
             .select("*")\
-            .eq("project_id", project_id)\
+            .eq("project_id", id)\
             .limit(1)\
             .execute()
 
         verify_res = sb.table("verify_runs")\
             .select("run_order, yield_val")\
-            .eq("project_id", project_id)\
+            .eq("project_id", id)\
             .order("run_order")\
             .execute()
 
@@ -485,25 +535,32 @@ def get_project(project_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"조회 오류: {str(e)}")
+        print(f"상세 조회 오류: {e}")
+        raise HTTPException(status_code=500, detail="프로젝트 상세 정보를 불러오는 중 오류가 발생했습니다.")
 
 
 # ─── DELETE /api/projects/{id} ────────────────────────────────────────────────
 
-@app.delete("/api/projects/{project_id}")
-def delete_project(project_id: str):
+@app.delete("/api/projects/{id}")
+async def delete_project(
+    id: str, 
+    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    user: dict = Depends(get_current_user)
+):
     _require_db()
+    sb.postgrest.auth(token.credentials)
     try:
-        existing = sb.table("projects").select("id").eq("id", project_id).execute()
+        existing = sb.table("projects").select("id").eq("id", id).eq("user_id", user.id).execute()
         if not existing.data:
-            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+            raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없거나 권한이 없습니다.")
         # CASCADE 설정으로 하위 데이터 자동 삭제
-        sb.table("projects").delete().eq("id", project_id).execute()
+        sb.table("projects").delete().eq("id", id).execute()
         return {"message": "삭제 완료"}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"삭제 오류: {str(e)}")
+        print(f"삭제 오류: {e}")
+        raise HTTPException(status_code=500, detail="프로젝트를 삭제하는 중 오류가 발생했습니다.")
 
 
 # ─── GET /api/health — 헬스체크 ──────────────────────────────────────────────

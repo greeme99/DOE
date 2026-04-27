@@ -1,9 +1,11 @@
 @import "tailwindcss";
 
-@theme {
-  --color-primary: #1E3A8A;
-  --color-success: #10B981;
-  --color-danger: #EF4444;
+:root {
+  --color-primary: #1e3a8a;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+  --color-warning: #f59e0b;
+  --color-info: #3b82f6;
 }
 
 :root {
@@ -62,8 +64,8 @@
   --color-sidebar-active-bg: #FFFFFF;
   --color-sidebar-active-text: #1E3A8A;
   --color-sidebar-active-border: #1E3A8A;
-  --color-btn-primary-bg: #FFFFFF;
-  --color-btn-primary-text: #1E3A8A;
+  --color-btn-primary-bg: #1E3A8A;
+  --color-btn-primary-text: #FFFFFF;
   --color-btn-primary-border: #1E3A8A;
   --color-inset-bg: #F3F4F6;
   --color-input-bg: #FFFFFF;
@@ -130,4 +132,29 @@ body {
 }
 .btn-theme-primary:hover {
   opacity: 0.9;
+}
+
+/* Print Styles - Fix oklab error by using native browser print */
+@media print {
+  nav, aside, button, header, [role="navigation"] {
+    display: none !important;
+  }
+  body, main {
+    background: white !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .max-w-5xl, .max-w-7xl {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .shadow-2xl, .shadow-sm {
+    box-shadow: none !important;
+    border: 1px solid #eee !important;
+  }
+  .pb-20, .p-4, .p-8 {
+    padding: 0 !important;
+  }
 }
