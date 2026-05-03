@@ -1,5 +1,5 @@
 import React from 'react';
-import { BarChart2, TrendingUp, Zap, Sparkles, Award, Target, HelpCircle } from 'lucide-react';
+import { BarChart2, TrendingUp, Zap, Award, Target, HelpCircle } from 'lucide-react';
 import PlotlyComponent from 'react-plotly.js';
 import Simulator from './Simulator';
 
@@ -88,10 +88,10 @@ export default function AnalysisDashboard({
       </div>
 
       {/* AI 진단 */}
-      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/30 dark:to-indigo-900/30 border border-blue-100 dark:border-blue-800 p-5 md:p-6 rounded-xl shadow-sm relative overflow-hidden">
-        <div className="absolute -right-4 -top-4 opacity-10"><Sparkles size={120} /></div>
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/40 dark:to-indigo-900/40 border border-blue-100 dark:border-blue-800 p-6 md:p-8 rounded-3xl shadow-xl relative overflow-hidden animate-slide-up glass">
+        <div className="absolute -right-4 -top-4 opacity-20 animate-float"><Zap size={160} className="text-blue-400" /></div>
         <h2 className="text-lg md:text-xl font-bold text-[--color-primary] dark:text-blue-400 mb-3 flex items-center gap-2">
-          <Sparkles size={22} className="text-blue-500" />
+          <Zap size={22} className="text-blue-500" />
           {t('analysisDashboard.title')} — R-Sq {r_sq_display}%
         </h2>
         <div className="space-y-2 relative z-10">
@@ -106,7 +106,7 @@ export default function AnalysisDashboard({
 
       {/* Chart Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-theme-card p-4 md:p-6 rounded-xl shadow-sm border border-theme">
+        <div className="bg-theme-card p-4 md:p-6 rounded-2xl shadow-sm border border-theme card-hover animate-slide-up" style={{ animationDelay: '0.1s' }}>
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <BarChart2 size={18} className="text-[--color-primary]" /> {t('analysisDashboard.pareto')}
           </h3>
@@ -120,7 +120,7 @@ export default function AnalysisDashboard({
           </div>
         </div>
 
-        <div className="bg-theme-card p-4 md:p-6 rounded-xl shadow-sm border border-theme">
+        <div className="bg-theme-card p-4 md:p-6 rounded-2xl shadow-sm border border-theme card-hover animate-slide-up" style={{ animationDelay: '0.1s' }}>
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <TrendingUp size={18} className="text-[--color-primary]" /> {t('analysisDashboard.mainEffect')} ({f0?.name})
           </h3>
@@ -134,7 +134,7 @@ export default function AnalysisDashboard({
           </div>
         </div>
 
-        <div className="bg-theme-card p-4 md:p-6 rounded-xl shadow-sm border border-theme">
+        <div className="bg-theme-card p-4 md:p-6 rounded-2xl shadow-sm border border-theme card-hover animate-slide-up" style={{ animationDelay: '0.1s' }}>
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <Zap size={18} className="text-[--color-primary]" /> {t('analysisDashboard.interaction')}
             <span className="text-xs text-theme-muted font-normal">({interaction_data?.factor_x} × {interaction_data?.factor_b})</span>
@@ -152,7 +152,7 @@ export default function AnalysisDashboard({
           </div>
         </div>
 
-        <div className="bg-theme-card p-4 md:p-6 rounded-xl shadow-sm border border-theme">
+        <div className="bg-theme-card p-4 md:p-6 rounded-2xl shadow-sm border border-theme card-hover animate-slide-up" style={{ animationDelay: '0.1s' }}>
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <Award size={18} className="text-[--color-primary]" /> {t('analysisDashboard.normalProb')}
           </h3>
@@ -170,7 +170,7 @@ export default function AnalysisDashboard({
         </div>
 
         {/* 잔차 vs 적합값 (Diagnostic 1) */}
-        <div className="bg-theme-card p-4 md:p-6 rounded-xl shadow-sm border border-theme">
+        <div className="bg-theme-card p-4 md:p-6 rounded-2xl shadow-sm border border-theme card-hover animate-slide-up" style={{ animationDelay: '0.1s' }}>
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <BarChart2 size={18} className="text-indigo-500" /> {t('analysisDashboard.residualVsFitted')}
           </h3>
@@ -192,7 +192,7 @@ export default function AnalysisDashboard({
         </div>
 
         {/* 예측 vs 실제 (Diagnostic 2) */}
-        <div className="bg-theme-card p-4 md:p-6 rounded-xl shadow-sm border border-theme">
+        <div className="bg-theme-card p-4 md:p-6 rounded-2xl shadow-sm border border-theme card-hover animate-slide-up" style={{ animationDelay: '0.1s' }}>
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <Target size={18} className="text-green-500" /> {t('analysisDashboard.predictedVsActual')}
           </h3>

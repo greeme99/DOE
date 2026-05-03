@@ -170,11 +170,41 @@ export default function App() {
         runs: runs.map(r => ({ ...r, yieldVal: parseFloat(r.yieldVal) })),
         factors,
       };
-      const d = await apiCall('/api/analyze', 'POST', payload);
+      const d = await apiCall(`/api/analyze?industry=${encodeURIComponent(industry)}`, 'POST', payload);
       setAnalysisResult(d);
       setCurrentTab(3);
+
+      // 곡률(Curvature) 감지 시 RSM 전환 제안
+      if (d.curvature_pvalue < 0.05) {
+        setTimeout(() => {
+          if (window.confirm(t('analysis.curvatureDetected') || '곡률(Curvature)이 발견되었습니다. 정밀 분석을 위해 RSM(반응표면분석)으로 전환하시겠습니까? \n확인을 누르면 CCD(중심합성설계)를 위한 추가 실험항이 생성됩니다.')) {
+            upgradeToRSM();
+          }
+        }, 500);
+      }
     } catch {
       alert(t('error.analysis') || '분석 중 오류가 발생했습니다.');
+    }
+    setIsLoading(false);
+  };
+
+  const upgradeToRSM = async () => {
+    setIsLoading(true);
+    try {
+      const d = await apiCall('/api/design/ccd', 'POST', { factors });
+      const nextId = Math.max(...runs.map(r => r.id)) + 1;
+      const newRuns = d.runs.map((r, i) => ({
+        ...r,
+        id: nextId + i,
+        runOrder: nextId + i,
+        isAxial: true // 축점 표시용
+      }));
+      setRuns([...runs, ...newRuns]);
+      setAnalysisResult(null); // 분석 결과 초기화 (추가 실험 필요)
+      setCurrentTab(2);
+      setDbMsg('✓ RSM(CCD) 전환 완료. 추가 실험값을 입력하세요.');
+    } catch (err) {
+      alert('RSM 전환 중 오류가 발생했습니다: ' + err.message);
     }
     setIsLoading(false);
   };
@@ -184,103 +214,112 @@ export default function App() {
 
   const exportFullReport = () => {
     setExportLoading(true);
-    if (!runs.length) { alert('실험표를 먼저 생성해주세요.'); setExportLoading(false); return; }
-    const wb = XLSX.utils.book_new();
+    console.log('[DOE Export] Start. runs:', runs.length, 'result:', !!analysisResult);
+    try {
+      if (!runs.length) { alert('실험표를 먼저 생성해주세요.'); setExportLoading(false); return; }
+      const wb = XLSX.utils.book_new();
 
-    // Sheet 1: Raw Data
-    const rawHeaders = ['Run#', ...factors.map(f => `${f.name}(${f.unit})`), '수율(%)'];
-    const rawData = [
-      ['DOE Raw Experiment Data'],
-      [`Project: ${projectName || industry}`],
-      [`Date: ${new Date().toLocaleDateString()}`],
-      [],
-      rawHeaders,
-      ...runs.map(r => [
-        r.runOrder,
-        ...factors.map(f => r.factor_values[f.key] ?? ''),
-        r.yieldVal !== '' ? parseFloat(r.yieldVal) : '',
-      ])
-    ];
-    const wsRaw = XLSX.utils.aoa_to_sheet(rawData);
-    XLSX.utils.book_append_sheet(wb, wsRaw, t('excelSheets.raw'));
-
-    // Sheet 2: AI Analysis & Diagnosis
-    if (analysisResult) {
-      const diagLines = getAIDiagnosisLines();
-      const analysisData = [
-        ['AI 공정 진단 보고서 요약'],
-        [],
-        ['[1. 핵심 진단 지표]'],
-        ['모델 정확도 (R-Squared)', (analysisResult.r_squared * 100).toFixed(2) + '%'],
-        ['공정 안정성 (p-value)', analysisResult.intercept_pvalue < 0.05 ? '안정' : '유의 요망'],
-        [],
-        ['[2. AI 진단 메시지]'],
-        ...diagLines.map(line => [line]),
-        [],
-        ['[3. 인자별 영향도 (Pareto)]'],
-        ['인자명', 't-value', 'p-value', '유의성'],
-        ...Object.entries(analysisResult.tvalues).map(([k, v]) => [
-          k, 
-          v.toFixed(4), 
-          (analysisResult.pvalues[analysisResult.factor_names[k]] || 1).toFixed(4),
-          (analysisResult.pvalues[analysisResult.factor_names[k]] || 1) < 0.05 ? '핵심인자' : '일반'
-        ])
-      ];
-      const wsAnalysis = XLSX.utils.aoa_to_sheet(analysisData);
-      XLSX.utils.book_append_sheet(wb, wsAnalysis, t('excelSheets.analysis'));
-
-      // Sheet 3: Golden Solution & ROI
-      const g = analysisResult.golden_solution || {};
-      const optData = [
-        ['Golden Solution - AI 최적 공정 조건'],
-        [],
-        ['[최적 조건 설정값]'],
-        ['인자명', '최적값', '단위', '수준(Coded)'],
-        ...factors.map(f => [
-          f.name, 
-          g[f.key] === 1 ? f.max : f.min, 
-          f.unit,
-          g[f.key] === 1 ? '+1 (High)' : '-1 (Low)'
-        ]),
-        [],
-        ['[기대 성과 분석]'],
-        ['예측 최대 수율', analysisResult.optimal_yield_pred.toFixed(2) + '%'],
-        ['현재 평균 수율', analysisResult.current_avg_yield.toFixed(2) + '%'],
-        ['수율 개선 기대량', analysisResult.yield_gain.toFixed(2) + '%p'],
-        ['예상 연간 절감액 (ROI)', '₩' + analysisResult.roi_amount.toLocaleString()],
-      ];
-      const wsOpt = XLSX.utils.aoa_to_sheet(optData);
-      XLSX.utils.book_append_sheet(wb, wsOpt, t('excelSheets.optimize'));
-
-      // Sheet 4: Verification Results
-      const verifyFilled = verifyRuns.filter(r => r.yieldVal !== '').length;
-      if (verifyFilled > 0) {
-        const pred = analysisResult?.optimal_yield_pred || 0;
-        const vAvg = verifyFilled === 3 ? (verifyRuns.reduce((s, r) => s + parseFloat(r.yieldVal || 0), 0) / 3) : 0;
+      // --- Sheet 0: Dashboard Summary (보고서 요약) ---
+      if (analysisResult) {
+        const diag = getAIDiagnosisLines();
+        const pred = Number(analysisResult.optimal_yield_pred || 0);
+        const fvCount = verifyRuns.filter(r => r.yieldVal !== '').length;
+        const vAvg = verifyRuns.reduce((s, r) => s + parseFloat(r.yieldVal || 0), 0) / Math.max(fvCount, 1);
         const vErr = Math.abs(vAvg - pred);
-        
-        const verifyData = [
-          ['현장 재현 실험 검증 결과'],
+        const g = analysisResult.golden_solution || {};
+
+        const dashboardData = [
+          ['DOE AI 공정 최적화 최종 보고서'],
           [],
-          ['검증 지표', '값'],
-          ['모델 예측 수율', pred.toFixed(2) + '%'],
-          ['현장 재현 평균', (vAvg || 0).toFixed(2) + '%'],
-          ['오차 범위 (Error)', vErr.toFixed(2) + '%p'],
+          ['[1. 핵심 진단 요약]'],
+          ...diag.map(l => [l]),
+          [],
+          ['[2. Golden Solution (최적 조건)]'],
+          ['인자명', '최적 설정값', '단위'],
+          ...factors.map(f => [f.name, g[f.key] === 1 ? f.max : f.min, f.unit]),
+          [],
+          ['[3. 현장 재현 검증 결과]'],
+          ['예측 수율', pred.toFixed(2) + '%'],
+          ['현장 실측 평균', vAvg.toFixed(2) + '%'],
+          ['오차 범위', vErr.toFixed(2) + '%p'],
           ['최종 판정', vErr <= 2 ? 'PASS (유효함)' : 'FAIL (오차큼)'],
           [],
-          ['[재현 실험 상세]'],
-          ['실험회차', '실측 수율(%)'],
-          ...verifyRuns.map((r, i) => [i + 1, r.yieldVal || '-'])
+          ['[4. 비즈니스 ROI 기대 성과]'],
+          ['연간 예상 절감액', '₩' + (analysisResult.roi_amount || 0).toLocaleString()],
+          ['수율 개선량', Number(analysisResult.yield_gain || 0).toFixed(2) + '%p'],
+          [],
+          ['발행일시: ' + new Date().toLocaleString()]
         ];
-        const wsVerify = XLSX.utils.aoa_to_sheet(verifyData);
-        XLSX.utils.book_append_sheet(wb, wsVerify, t('excelSheets.verify'));
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dashboardData), '보고서');
       }
-    }
 
-    const fileName = `DOE_Report_${projectName || industry}_${new Date().toISOString().slice(0, 10)}.xlsx`;
-    XLSX.writeFile(wb, fileName);
+      // Sheet 1: Raw Data
+      const hdr = ['Run#', ...factors.map(f => f.name + '(' + f.unit + ')'), '수율(%)'];
+      const dataRows = runs.map(r => {
+        const fv = r.factor_values || r;
+        return [r.runOrder, ...factors.map(f => fv[f.key] != null ? fv[f.key] : ''), r.yieldVal !== '' ? parseFloat(r.yieldVal) : ''];
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['DOE Raw Data'], ['Project: ' + (projectName || industry)], [], hdr, ...dataRows]), '실험데이터');
+      console.log('[DOE Export] Sheet1 OK');
+
+      if (analysisResult) {
+        // Sheet 2: Analysis Detail
+        const diag = getAIDiagnosisLines();
+        const s2 = [['AI 진단 상세'], [], ['R-Sq', (Number(analysisResult.r_squared || 0) * 100).toFixed(1) + '%'], [],
+          ...diag.map(l => [l]), [], ['인자', 't-value', 'p-value'],
+          ...Object.entries(analysisResult.tvalues || {}).map(([k, v]) => [analysisResult.factor_names && analysisResult.factor_names[k] || k, Number(v).toFixed(3), Number((analysisResult.pvalues && analysisResult.pvalues[k]) || 1).toFixed(3)])
+        ];
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s2), '분석상세');
+
+        // Sheet 3: Golden Solution Detail
+        const g = analysisResult.golden_solution || {};
+        const s3 = [['Golden Solution'], [], ['인자', '최적값', '단위'],
+          ...factors.map(f => [f.name, g[f.key] === 1 ? f.max : f.min, f.unit]), [],
+          ['예측수율', Number(analysisResult.optimal_yield_pred || 0).toFixed(1) + '%'],
+          ['현재평균', Number(analysisResult.current_avg_yield || 0).toFixed(1) + '%'],
+          ['개선량', Number(analysisResult.yield_gain || 0).toFixed(1) + '%p'],
+          ['ROI', '₩' + (analysisResult.roi_amount || 0).toLocaleString()]
+        ];
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s3), '최적조건상세');
+
+        // Sheet 4: Verification Detail
+        const fv = verifyRuns.filter(r => r.yieldVal !== '').length;
+        if (fv > 0) {
+          const pred = Number(analysisResult.optimal_yield_pred || 0);
+          const avg = verifyRuns.reduce((s, r) => s + parseFloat(r.yieldVal || 0), 0) / Math.max(fv, 1);
+          const err = Math.abs(avg - pred);
+          const s4 = [['검증결과 상세'], [], ['예측', pred.toFixed(1) + '%'], ['평균', avg.toFixed(1) + '%'], ['오차', err.toFixed(1) + '%p'], ['판정', err <= 2 ? 'PASS' : 'FAIL'],
+            [], ...verifyRuns.map((r, i) => [i + 1, r.yieldVal || '-'])
+          ];
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s4), '검증실험');
+        }
+      }
+
+      const nm = (projectName || industry || 'DOE').replace(/[^a-zA-Z0-9\uAC00-\uD7AF]/g, '');
+      const fn = 'DOE_Final_Report_' + nm + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+      const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([buf], { type: 'application/octet-stream' });
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = u;
+      a.download = fn;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      setTimeout(function() {
+        a.click();
+        setTimeout(function() {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(u);
+          console.log('[DOE Export] DONE:', fn);
+        }, 300);
+      }, 50);
+    } catch (e) {
+      console.error('[DOE Export] ERROR:', e);
+      alert('다운로드 오류: ' + e.message);
+    }
     setExportLoading(false);
   };
+
 
 
   const handleExcelUpload = (e) => {

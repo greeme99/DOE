@@ -12,6 +12,9 @@ import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from scipy import stats
+import google.generativeai as genai
+import httpx
+import json
 
 app = FastAPI(title="DOE Auto API", version="2.0")
 auth_scheme = HTTPBearer()
@@ -55,6 +58,16 @@ if _sb_url and _sb_key:
 else:
     print("[Supabase] 환경변수 없음 — DB 기능 비활성화 (로컬 모드)")
 
+# ─── LLM Configuration ────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print("[Gemini] API configured")
+
+ANYTHING_LLM_API_KEY = os.getenv("ANYTHING_LLM_API_KEY", "")
+ANYTHING_LLM_URL = os.getenv("ANYTHING_LLM_URL", "http://localhost:3001/api/v1")
+ANYTHING_LLM_WORKSPACE = os.getenv("ANYTHING_LLM_WORKSPACE", "doe-analysis")
+
 # ─── Pydantic Models (Strict Validation) ──────────────────────────────────────
 
 class FactorItem(BaseModel):
@@ -91,6 +104,7 @@ class AnalysisResultModel(BaseModel):
     yield_gain: float
     roi_amount: int
     ai_diagnosis: str
+    curvature_pvalue: float
     norm_plot_x: List[float]
     norm_plot_y: List[float]
     interaction_data: Dict[str, Any]
@@ -151,40 +165,112 @@ def generate_design(req: FactorsRequest):
 
     return {"runs": runs, "run_count": len(runs), "k": k}
 
+# ─── CCD (Axial Points) Generation ──────────────────────────────────────────
+
+@app.post("/api/design/ccd")
+def generate_ccd(req: FactorsRequest):
+    k = len(req.factors)
+    # alpha calculation (Rotatable)
+    alpha = (2**k)**0.25
+    if k == 4: alpha = 2.0 # 2^(4-1) resolution IV case or standard
+    if k == 5: alpha = 2.0 # Face-centered is often preferred for 5 factors in field
+
+    axial_runs = []
+    run_idx = 1
+    for i in range(k):
+        for sign in [-1, 1]:
+            fv = {}
+            for fi, f in enumerate(req.factors):
+                if fi == i:
+                    # Scale alpha to real values
+                    mid = (f.min + f.max) / 2
+                    half_range = (f.max - f.min) / 2
+                    val = mid + (sign * alpha * half_range)
+                    fv[f.key] = round(val, 4)
+                else:
+                    fv[f.key] = round((f.min + f.max) / 2, 4)
+            axial_runs.append({"id": run_idx, "runOrder": run_idx, "factor_values": fv, "yieldVal": ""})
+            run_idx += 1
+            
+    # Add some more center points for RSM
+    for _ in range(2):
+        fv = {f.key: round((f.min + f.max) / 2, 4) for f in req.factors}
+        axial_runs.append({"id": run_idx, "runOrder": run_idx, "factor_values": fv, "yieldVal": ""})
+        run_idx += 1
+
+    return {"runs": axial_runs, "alpha": round(alpha, 3)}
+
 # ─── AI Diagnosis ─────────────────────────────────────────────────────────────
 
-def gen_diagnosis(tvalues, pvalues, params, yield_gain, opt_yield, cur_avg, name_map):
-    main_keys = [k for k in tvalues if '*' not in k]
+def gen_diagnosis(tvalues, pvalues, params, yield_gain, opt_yield, cur_avg, name_map, industry="사출성형"):
+    # 1. 통계적 기본 요약 (기존 로직 유지)
+    main_keys = [k for k in tvalues if '*' not in k and '^2' not in k]
     if not main_keys:
         return "분석 결과가 부족합니다. 데이터를 확인해주세요."
+    
     top       = max(main_keys, key=lambda k: abs(tvalues.get(k, 0)))
     t_abs     = abs(tvalues[top])
     p_val     = pvalues.get(top, 1.0)
     p_str     = "p<0.001" if p_val < 0.001 else f"p={p_val:.3f}"
     direction = "높이면" if params.get(top, 0) > 0 else "낮추면"
     top_name  = name_map.get(top, top)
-    inter_sig = [k for k, p in pvalues.items() if '*' in k and p < 0.05]
-    sig_main  = [k for k in main_keys if pvalues.get(k, 1.0) < 0.05]
-    sig_quad  = [k for k, p in pvalues.items() if '^2' in k and p < 0.05]
+    
+    stat_summary = f"{top_name}(t={t_abs:.1f}, {p_str})이(가) 수율에 가장 큰 영향 — {direction} 수율↑. " \
+                   f"최적 조건 적용 시 {cur_avg:.1f}% → {opt_yield:.1f}%(+{yield_gain:.1f}%p) 달성 예상."
 
-    parts = [
-        f"{top_name}(t={t_abs:.1f}, {p_str})이(가) 수율에 가장 큰 영향 — {direction} 수율↑.",
-        f"최적 조건 적용 시 {cur_avg:.1f}% → {opt_yield:.1f}%(+{yield_gain:.1f}%p) 달성 예상."
-    ]
-    if inter_sig:
-        names = [' × '.join(name_map.get(p, p) for p in k.split('*')) for k in inter_sig]
-        parts.append(f"교호작용({', '.join(names)}) 유의 — 단순 선형 모델로는 한계.")
-    if sig_quad:
-        q_names = [name_map.get(k.replace('^2',''), k.replace('^2','')) for k in sig_quad]
-        parts.append(f"곡선 관계(Curvature, {', '.join(q_names)}) 감지 — 중심점 부근에서 극대/극소점 존재 가능성.")
-    if not sig_main:
-        parts.append("유의 주효과 없음 — 실험 범위·측정 정밀도 재검토 권장.")
-    return " | ".join(parts)
+    # 2. LLM 기반 현장 조치 가이드 생성
+    llm_guide, provider = call_llm_action_guide(industry, top_name, direction, yield_gain, stat_summary)
+    
+    return f"{stat_summary} | {llm_guide} (Source: {provider})"
 
-# ─── Analysis ────────────────────────────────────────────────────────────────
+def call_llm_action_guide(industry, top_factor, direction, gain, stat_summary):
+    prompt = f"""
+    당신은 제조 현장의 DOE(실험계획법) 데이터 분석 전문가입니다.
+    다음 통계 분석 결과를 바탕으로 현장 엔지니어가 즉시 실천할 수 있는 '현장 맞춤형 조치 가이드'를 3줄 이내로 작성하세요.
+    전문 용어보다는 현장 용어를 사용하고, 구체적인 액션을 제안하세요.
+
+    [상황]
+    - 산업군: {industry}
+    - 가장 유의한 인자: {top_factor}
+    - 조치 방향: {top_factor}을(를) {direction}
+    - 기대 효과: 수율 {gain}%p 개선 예상
+    - 통계 요약: {stat_summary}
+
+    [출력 형식]
+    - 반드시 한국어로 답변하세요.
+    - 친절하지만 간결한 전문가 말투를 사용하세요.
+    - 번호나 불필요한 서론 없이 3줄 이내의 평문 또는 리스트 형식으로 답변하세요.
+    """
+
+    # Try Gemini first
+    if GEMINI_API_KEY:
+        try:
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            response = model.generate_content(prompt)
+            if response and response.text:
+                return response.text.strip(), "Gemini"
+        except Exception as e:
+            print(f"[Gemini Error] Fallback to AnythingLLM: {e}")
+
+    # Fallback to AnythingLLM
+    if ANYTHING_LLM_API_KEY:
+        try:
+            headers = {"Authorization": f"Bearer {ANYTHING_LLM_API_KEY}", "Content-Type": "application/json"}
+            url = f"{ANYTHING_LLM_URL}/workspace/{ANYTHING_LLM_WORKSPACE}/chat"
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(url, headers=headers, json={
+                    "message": prompt,
+                    "mode": "chat"
+                })
+                if resp.status_code == 200:
+                    return resp.json().get("textResponse", "").strip(), "AnythingLLM"
+        except Exception as e:
+            print(f"[AnythingLLM Error] {e}")
+
+    return "현장 데이터 기반의 정밀 제어가 권장됩니다. 설비 유지보수 및 인자별 공차 범위를 재점검하십시오.", "System"
 
 @app.post("/api/analyze")
-def analyze_data(req: AnalyzeRequest):
+def analyze_data(req: AnalyzeRequest, industry: str = "사출성형"):
     fkeys  = [f.key  for f in req.factors]
     fnames = {f.key: f.name for f in req.factors}
 
@@ -229,7 +315,7 @@ def analyze_data(req: AnalyzeRequest):
     r_sq      = float(model.rsquared) if not np.isnan(model.rsquared) else 0.0
     intercept = float(model.params.iloc[0]) if not np.isnan(model.params.iloc[0]) else 0.0
 
-    # Golden solution (RSM에서는 단순 부호 판별이 아니라 최적점 탐색이 필요하지만, 여기선 기본 구현 유지 후 프론트에서 시뮬레이션 지원)
+    # Golden solution
     golden = {k: (1 if params.get(k, 0) > 0 else -1) for k in fkeys}
 
     def predict_coded(cv):
@@ -257,7 +343,7 @@ def analyze_data(req: AnalyzeRequest):
     n      = len(resids)
     norm_x = [round(float(stats.norm.ppf((i+0.5)/n)), 4) for i in range(n)]
 
-    # Interaction plot (첫 두 인자)
+    # Interaction plot
     interact = {}
     if len(fkeys) >= 2:
         k0, k1 = fkeys[0], fkeys[1]
@@ -281,9 +367,19 @@ def analyze_data(req: AnalyzeRequest):
             return ' × '.join(fnames.get(p, p) for p in col.split('*'))
         return fnames.get(col, col)
 
+    # ─── Curvature Test (p-value) ───
+    is_center = (coded[fkeys].abs() < 0.1).all(axis=1)
+    is_factorial = (coded[fkeys].abs() > 0.9).all(axis=1)
+    curvature_p = 1.0
+    if is_center.any() and is_factorial.any():
+        yield_center = df.loc[is_center, "yieldVal"]
+        yield_factorial = df.loc[is_factorial, "yieldVal"]
+        if len(yield_center) >= 1 and len(yield_factorial) >= 1:
+            _, curvature_p = stats.ttest_ind(yield_center, yield_factorial, equal_var=False)
+
     ai_diag = gen_diagnosis(
         tvalues, pvalues, params,
-        round(yield_gain, 2), round(opt_yield, 2), round(cur_avg, 2), fnames
+        round(yield_gain, 2), round(opt_yield, 2), round(cur_avg, 2), fnames, industry
     )
 
     return {
@@ -305,7 +401,7 @@ def analyze_data(req: AnalyzeRequest):
         "yield_gain":         round(yield_gain, 2),
         "roi_amount":         roi_amount,
         "ai_diagnosis":       ai_diag,
-        # 진단용 차트 데이터 추가
+        "curvature_pvalue":   round(float(curvature_p), 4),
         "residuals":          [round(float(r), 4) for r in model.resid.tolist()],
         "fitted_values":      [round(float(v), 4) for v in model.fittedvalues.tolist()],
         "actual_values":      [round(float(v), 4) for v in Y.tolist()],

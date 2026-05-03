@@ -62,6 +62,9 @@ export const translations = {
       total: '전체',
       guide: '도움말: 모든 수율 데이터가 입력되어야 분석이 가능합니다. 엑셀을 통해 일괄 입력할 수 있습니다.'
     },
+    analysis: {
+      curvatureDetected: '곡률(Curvature)이 발견되었습니다. 정밀 분석을 위해 RSM(반응표면분석)으로 전환하시겠습니까? \n확인을 누르면 CCD(중심합성설계)를 위한 추가 실험항이 생성됩니다.'
+    },
 
     analysisDashboard: {
       title: 'AI 공정 진단 보고서',
@@ -177,6 +180,9 @@ export const translations = {
       completed: 'Completed',
       total: 'Total',
       guide: 'Help: All yield data must be entered for analysis. You can use Excel for bulk updates.'
+    },
+    analysis: {
+      curvatureDetected: 'Curvature has been detected. Would you like to transition to RSM (Response Surface Methodology) for precise analysis? \nClick OK to generate additional experimental runs for CCD (Central Composite Design).'
     },
 
     analysisDashboard: {

@@ -107,13 +107,17 @@ export default function VerificationPanel({
           </div>
         </div>
 
-        <div className="mt-12 flex justify-center border-t border-theme pt-8">
+        <div className="mt-12 flex justify-center border-t border-theme pt-12">
           <button
             onClick={() => setCurrentTab(6)}
             disabled={!verifyFilled}
-            className="w-full md:w-auto flex items-center justify-center gap-3 px-12 py-5 bg-[--color-primary] text-white rounded-[16px] font-black text-xl shadow-xl hover:bg-blue-800 disabled:opacity-40 transition"
+            className={`w-full md:w-auto flex items-center justify-center gap-4 px-16 py-6 rounded-[24px] font-black text-2xl shadow-2xl transition-all duration-300 transform active:scale-95 ${
+              verifyFilled 
+                ? 'bg-gradient-to-r from-blue-700 to-indigo-800 text-white hover:from-blue-800 hover:to-indigo-900 shadow-blue-500/30 animate-pulse-soft cursor-pointer' 
+                : 'bg-gray-200 text-gray-400 cursor-not-allowed opacity-50'
+            }`}
           >
-            <FileText size={24} /> {t('verification.finalReport')}
+            <FileText size={28} /> {t('verification.finalReport')}
           </button>
         </div>
       </div>

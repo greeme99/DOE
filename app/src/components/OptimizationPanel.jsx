@@ -29,30 +29,30 @@ export default function OptimizationPanel({
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
           {/* Predicted Yield */}
-          <div className="bg-theme-inset p-6 rounded-2xl border border-theme flex flex-col items-center justify-center relative overflow-hidden group">
-            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:scale-110 transition"><TrendingUp size={60} /></div>
-            <span className="text-xs font-bold text-theme-muted uppercase tracking-widest mb-2">{t('optimization.predictedYield')}</span>
-            <div className="text-5xl font-black text-[--color-primary]">{predictedYield}%</div>
+          <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-8 rounded-3xl shadow-xl flex flex-col items-center justify-center relative overflow-hidden group animate-slide-up">
+            <div className="absolute top-0 right-0 p-4 opacity-20 group-hover:scale-110 transition animate-float"><TrendingUp size={80} className="text-white" /></div>
+            <span className="text-[10px] font-black text-blue-100 uppercase tracking-widest mb-2 relative z-10">{t('optimization.predictedYield')}</span>
+            <div className="text-6xl font-black text-white relative z-10 drop-shadow-lg">{predictedYield}%</div>
           </div>
 
           {/* ROI */}
-          <div className="bg-theme-inset p-6 rounded-2xl border border-theme flex flex-col items-center justify-center relative overflow-hidden group">
-            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:scale-110 transition"><DollarSign size={60} /></div>
-            <span className="text-xs font-bold text-theme-muted uppercase tracking-widest mb-2">{t('optimization.roi')}</span>
-            <div className="text-3xl font-black text-[--color-success]">₩{roiAmountKRW}</div>
-            <span className="text-[10px] text-theme-muted mt-1">Estimated Annual Savings</span>
+          <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-8 rounded-3xl shadow-xl flex flex-col items-center justify-center relative overflow-hidden group animate-slide-up" style={{ animationDelay: '0.1s' }}>
+            <div className="absolute top-0 right-0 p-4 opacity-20 group-hover:scale-110 transition animate-float"><DollarSign size={80} className="text-white" /></div>
+            <span className="text-[10px] font-black text-emerald-100 uppercase tracking-widest mb-2 relative z-10">{t('optimization.roi')}</span>
+            <div className="text-4xl font-black text-white relative z-10 drop-shadow-lg">₩{roiAmountKRW}</div>
+            <span className="text-[10px] text-emerald-100 font-bold mt-2 opacity-80 relative z-10">Estimated Annual Savings</span>
           </div>
 
           {/* Optimal Conditions */}
-          <div className="bg-theme-inset p-6 rounded-2xl border border-theme lg:col-span-1 md:col-span-2">
-            <span className="text-xs font-bold text-theme-muted uppercase tracking-widest mb-4 block">Optimal Conditions</span>
-            <div className="space-y-3">
+          <div className="bg-theme-card p-8 rounded-3xl shadow-xl border-2 border-theme lg:col-span-1 md:col-span-2 animate-slide-up glass" style={{ animationDelay: '0.2s' }}>
+            <span className="text-[10px] font-black text-theme-muted uppercase tracking-widest mb-6 block">Optimal Parameters</span>
+            <div className="space-y-4">
               {factors.map(f => {
                 const isMax = analysisResult.golden_solution[f.key] === 1;
                 return (
-                  <div key={f.key} className="flex justify-between items-center bg-theme-card px-4 py-2 rounded-lg border border-theme">
-                    <span className="text-sm font-bold text-theme-main">{f.name}</span>
-                    <span className={`text-sm font-black ${isMax ? 'text-green-500' : 'text-blue-500'}`}>
+                  <div key={f.key} className="flex justify-between items-center bg-theme-inset px-5 py-3 rounded-2xl border border-theme card-hover">
+                    <span className="text-sm font-black text-theme-main">{f.name}</span>
+                    <span className={`text-base font-black ${isMax ? 'text-emerald-500' : 'text-blue-500'}`}>
                       {isMax ? f.max : f.min} <span className="text-[10px] opacity-60 ml-0.5">{f.unit}</span>
                     </span>
                   </div>
@@ -78,12 +78,12 @@ export default function OptimizationPanel({
           </div>
         </div>
 
-        <div className="flex justify-center">
+        <div className="flex justify-center mt-12">
           <button
             onClick={() => setCurrentTab(5)}
-            className="flex items-center gap-3 px-12 py-5 bg-[--color-primary] text-white rounded-[16px] font-black text-xl shadow-xl hover:bg-blue-800 active:scale-95 transition"
+            className="flex items-center gap-4 px-16 py-6 bg-gradient-to-r from-blue-700 to-indigo-800 text-white rounded-[24px] font-black text-2xl shadow-2xl shadow-blue-500/30 hover:from-blue-800 hover:to-indigo-900 animate-pulse-soft active:scale-95 transition-all duration-300"
           >
-            {t('optimization.goToVerify')} <ArrowRight size={24} />
+            {t('optimization.goToVerify')} <ArrowRight size={28} />
           </button>
         </div>
       </div>
