@@ -24,29 +24,6 @@ from fastapi.responses import StreamingResponse
 app = FastAPI(title="DOE Auto API", version="2.0")
 auth_scheme = HTTPBearer()
 
-@app.get("/")
-def root():
-    return {
-        "status": "online",
-        "service": "DOE Auto API",
-        "db_connected": sb is not None,
-        "llm_ready": bool(GEMINI_API_KEY)
-    }
-
-def _require_db():
-    if sb is None:
-        raise HTTPException(status_code=503, detail="Database not configured")
-
-async def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-    _require_db()
-    try:
-        user_res = sb.auth.get_user(token.credentials)
-        if not user_res.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return user_res.user
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
-
 # ─── CORS (보안 강화를 위해 특정 오리진만 허용) ─────────────────────────────
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",")]
@@ -85,6 +62,32 @@ elif GEMINI_API_KEY:
 ANYTHING_LLM_API_KEY = os.getenv("ANYTHING_LLM_API_KEY", "")
 ANYTHING_LLM_URL = os.getenv("ANYTHING_LLM_URL", "http://localhost:3001/api/v1")
 ANYTHING_LLM_WORKSPACE = os.getenv("ANYTHING_LLM_WORKSPACE", "doe-analysis")
+
+# ─── 전역 변수 초기화 완료 후 라우트 정의 ─────────────────────────────────────
+
+def _require_db():
+    if sb is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+async def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
+    _require_db()
+    try:
+        user_res = sb.auth.get_user(token.credentials)
+        if not user_res.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return user_res.user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "DOE Auto API",
+        "version": "2.0",
+        "db_connected": sb is not None,
+        "llm_ready": bool(GEMINI_API_KEY)
+    }
 
 # ─── Pydantic Models (Strict Validation) ──────────────────────────────────────
 
