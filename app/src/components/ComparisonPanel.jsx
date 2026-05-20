@@ -4,7 +4,7 @@ import PlotlyComponent from 'react-plotly.js';
 const Plot = PlotlyComponent.default || PlotlyComponent;
 
 export default function ComparisonPanel({ t, projectList, compareIds }) {
-  const selectedProjects = projectList.filter(p => compareIds.includes(p.id));
+  const selectedProjects = projectList || [];
 
   if (selectedProjects.length < 2) {
     return (

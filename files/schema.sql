@@ -9,6 +9,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ── 1. projects ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS projects (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID        NOT NULL, -- Supabase Auth의 user.id와 연동
   name        TEXT        NOT NULL,
   industry    TEXT        NOT NULL DEFAULT '사출성형',
   status      TEXT        NOT NULL DEFAULT 'in_progress',
@@ -56,9 +57,13 @@ CREATE TABLE IF NOT EXISTS results (
   yield_gain          FLOAT,
   roi_amount          BIGINT,
   ai_diagnosis        TEXT,
+  curvature_pvalue    FLOAT DEFAULT 1.0,
   norm_plot_x         JSONB  DEFAULT '[]',
   norm_plot_y         JSONB  DEFAULT '[]',
   interaction_data    JSONB  DEFAULT '{}',
+  residuals           JSONB  DEFAULT '[]',
+  fitted_values       JSONB  DEFAULT '[]',
+  actual_values       JSONB  DEFAULT '[]',
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -75,6 +80,7 @@ CREATE INDEX IF NOT EXISTS idx_factors_project  ON factors(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project     ON runs(project_id, run_order);
 CREATE INDEX IF NOT EXISTS idx_verify_project   ON verify_runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_projects_created ON projects(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_projects_user    ON projects(user_id);
 
 -- ── updated_at 자동 갱신 트리거 ──────────────────────────────
 CREATE OR REPLACE FUNCTION set_updated_at()
@@ -90,8 +96,19 @@ CREATE TRIGGER trg_projects_updated
   BEFORE UPDATE ON projects
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- ── RLS 비활성화 (서버사이드 service key 사용, 프론트 직접 접근 없음) ──
-ALTER TABLE projects    DISABLE ROW LEVEL SECURITY;
+-- ── RLS (행 수준 보안) 설정 ──────────────────────────────────
+-- 서비스 키를 사용하는 백엔드에서 접근하므로 RLS를 비활성화하거나,
+-- 보안을 위해 활성화 후 정책을 설정할 수 있습니다. 
+-- 여기서는 기본적으로 활성화하고, 본인 데이터만 접근 가능한 정책을 예시로 둡니다.
+
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+
+-- 본인의 프로젝트만 조회/수정/삭제 가능
+DROP POLICY IF EXISTS "Users can manage their own projects" ON projects;
+CREATE POLICY "Users can manage their own projects" ON projects
+  FOR ALL USING (auth.uid() = user_id);
+
+-- 하위 테이블들은 projects와 JOIN하여 권한 확인 (또는 간소화를 위해 DISABLE 선언 가능)
 ALTER TABLE factors     DISABLE ROW LEVEL SECURITY;
 ALTER TABLE runs        DISABLE ROW LEVEL SECURITY;
 ALTER TABLE results     DISABLE ROW LEVEL SECURITY;

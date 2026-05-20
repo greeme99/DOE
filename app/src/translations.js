@@ -21,7 +21,11 @@ export const translations = {
       signupSuccess: '회원가입 성공!',
       signupSuccessDesc: '입력하신 이메일로 인증 링크를 보냈습니다. 링크를 클릭하여 가입을 완료해 주세요.',
       emailVerificationRequired: '이메일 인증이 완료되지 않았습니다. 메일함을 확인해 주세요.',
-      logout: '로그아웃'
+      logout: '로그아웃',
+      saveCurrentWork: '현재 작업을 DB에 저장',
+      savedProjects: '저장된 프로젝트',
+      load: '불러오기',
+      compareSelected: '선택한 프로젝트 비교'
     },
     
     tabs: {
@@ -140,7 +144,11 @@ export const translations = {
       signupSuccess: 'Sign up successful!',
       signupSuccessDesc: "We've sent a verification link to your email. Please click it to complete registration.",
       emailVerificationRequired: 'Email verification is not complete. Please check your inbox.',
-      logout: 'Logout'
+      logout: 'Logout',
+      saveCurrentWork: 'Save current work to DB',
+      savedProjects: 'Saved Projects',
+      load: 'Load',
+      compareSelected: 'Compare Selected'
     },
 
     tabs: {

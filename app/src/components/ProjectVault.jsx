@@ -1,5 +1,5 @@
-import React from 'react';
-import { Database, X, Save, CheckCircle, Trash2, ChevronRight } from 'lucide-react';
+import React, { useState } from 'react';
+import { Database, X, Save, Trash2, ChevronRight, AlertTriangle } from 'lucide-react';
 
 export default function ProjectVault({
   t,
@@ -20,7 +20,22 @@ export default function ProjectVault({
   toggleCompare,
   setCurrentTab
 }) {
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
   if (!showProjectPanel) return null;
+
+  const handleDeleteClick = (id) => {
+    setConfirmDeleteId(id);
+  };
+
+  const handleDeleteConfirm = async (id, name) => {
+    setConfirmDeleteId(null);
+    await deleteProject(id, name);
+  };
+
+  const handleDeleteCancel = () => {
+    setConfirmDeleteId(null);
+  };
 
   return (
     <div
@@ -29,9 +44,7 @@ export default function ProjectVault({
       }}
       className="fixed inset-0 bg-black/45 z-50 flex items-start justify-end"
     >
-      <div
-        className="h-full bg-theme-card shadow-2xl flex flex-col w-[min(420px,100vw)] border-l border-theme"
-      >
+      <div className="h-full bg-theme-card shadow-2xl flex flex-col w-[min(420px,100vw)] border-l border-theme">
         {/* 패널 헤더 */}
         <div className="flex items-center justify-between p-5 border-b border-theme flex-shrink-0">
           <div className="flex items-center gap-2">
@@ -82,60 +95,85 @@ export default function ProjectVault({
           </div>
 
           <div className="space-y-2">
-            {projectList.map(proj => {
+            {projectList?.map(proj => {
               const isActive = proj.id === projectId;
+              const isConfirming = confirmDeleteId === proj.id;
               const updatedAt = new Date(proj.updated_at);
               return (
                 <div
                   key={proj.id}
-                  className={`p-3 rounded-xl border transition flex items-center gap-3 ${
+                  className={`p-3 rounded-xl border transition ${
                     isActive
                       ? 'border-[--color-primary] bg-blue-50 dark:bg-blue-900/20'
                       : 'border-theme bg-theme-card hover:bg-theme-inset'
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={compareIds.includes(proj.id)}
-                    onChange={() => toggleCompare(proj.id)}
-                    className="w-4 h-4 rounded border-theme text-[--color-primary] focus:ring-[--color-primary]"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold text-theme-main truncate">{proj.name}</p>
-                    <div className="flex items-center gap-2 text-[10px] text-theme-muted mt-0.5">
-                      <span>{proj.industry}</span>
-                      <span>·</span>
-                      <span>{updatedAt.toLocaleDateString()}</span>
-                    </div>
-                  </div>
-
-                    <div className="flex gap-1 flex-shrink-0">
+                  {isConfirming ? (
+                    /* 삭제 확인 인라인 UI */
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
+                      <span className="text-xs text-red-600 font-bold flex-1">
+                        &quot;{proj.name}&quot; 삭제하시겠습니까?
+                      </span>
                       <button
-                        onClick={() => loadProjectDetail(proj.id)}
-                        disabled={dbLoading}
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+                        onClick={() => handleDeleteConfirm(proj.id, proj.name)}
+                        className="px-3 py-1.5 bg-red-500 text-white rounded-lg text-xs font-bold hover:bg-red-600 transition"
                       >
-                        <ChevronRight size={12} /> {t('auth.load') || 'Load'}
+                        삭제
                       </button>
                       <button
-                        onClick={() => deleteProject(proj.id)}
-                        className="p-1.5 rounded-lg text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition"
+                        onClick={handleDeleteCancel}
+                        className="px-3 py-1.5 bg-theme-inset text-theme-muted rounded-lg text-xs font-bold hover:bg-theme-card border border-theme transition"
                       >
-                        <Trash2 size={13} />
+                        취소
                       </button>
                     </div>
-                  </div>
-                );
+                  ) : (
+                    /* 기본 프로젝트 행 */
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="checkbox"
+                        checked={compareIds.includes(proj.id)}
+                        onChange={() => toggleCompare(proj.id)}
+                        className="w-4 h-4 rounded border-theme text-[--color-primary] focus:ring-[--color-primary] flex-shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold text-theme-main truncate">{proj.name}</p>
+                        <div className="flex items-center gap-2 text-[10px] text-theme-muted mt-0.5">
+                          <span>{proj.industry}</span>
+                          <span>·</span>
+                          <span>{updatedAt.toLocaleDateString()}</span>
+                        </div>
+                      </div>
+                      <div className="flex gap-1 flex-shrink-0">
+                        <button
+                          onClick={() => loadProjectDetail(proj.id)}
+                          disabled={dbLoading}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50"
+                        >
+                          <ChevronRight size={12} /> {t('auth.load') || '불러오기'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteClick(proj.id)}
+                          className="p-1.5 rounded-lg text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
             })}
           </div>
         </div>
-        
+
         {/* 비교하기 버튼 */}
         <div className="p-4 border-t border-theme bg-theme-inset flex-shrink-0">
           <button
             onClick={() => {
               setShowProjectPanel(false);
-              setCurrentTab(7); // 비교 탭으로 이동
+              setCurrentTab(7);
             }}
             disabled={compareIds.length < 2}
             className="w-full py-3 bg-gray-900 text-white rounded-xl font-bold text-sm hover:bg-black transition disabled:opacity-30 flex items-center justify-center gap-2"

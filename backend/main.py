@@ -12,12 +12,26 @@ import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from scipy import stats
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 import httpx
 import json
+import io
+from fastapi.responses import StreamingResponse
 
 app = FastAPI(title="DOE Auto API", version="2.0")
 auth_scheme = HTTPBearer()
+
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "DOE Auto API",
+        "db_connected": sb is not None,
+        "llm_ready": bool(GEMINI_API_KEY)
+    }
 
 def _require_db():
     if sb is None:
@@ -52,17 +66,21 @@ if _sb_url and _sb_key:
     try:
         from supabase import create_client
         sb = create_client(_sb_url, _sb_key)
-        print(f"[Supabase] connected → {_sb_url[:40]}...")
+        print(f"[Supabase] Connected to project: {_sb_url}")
+    except ImportError:
+        print("[Supabase] 'supabase' package not found. Run 'pip install supabase'.")
     except Exception as e:
-        print(f"[Supabase] 연결 실패 (supabase 패키지 설치 여부 확인): {e}")
+        print(f"[Supabase] Connection failed: {e}")
 else:
-    print("[Supabase] 환경변수 없음 — DB 기능 비활성화 (로컬 모드)")
+    print("[Supabase] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY. Running in Local Mode (DB Disabled).")
 
 # ─── LLM Configuration ────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GEMINI_API_KEY:
+if GEMINI_API_KEY and genai:
     genai.configure(api_key=GEMINI_API_KEY)
     print("[Gemini] API configured")
+elif GEMINI_API_KEY:
+    print("[Gemini] google-generativeai package not found. Skipping config.")
 
 ANYTHING_LLM_API_KEY = os.getenv("ANYTHING_LLM_API_KEY", "")
 ANYTHING_LLM_URL = os.getenv("ANYTHING_LLM_URL", "http://localhost:3001/api/v1")
@@ -108,6 +126,9 @@ class AnalysisResultModel(BaseModel):
     norm_plot_x: List[float]
     norm_plot_y: List[float]
     interaction_data: Dict[str, Any]
+    residuals: Optional[List[float]] = []
+    fitted_values: Optional[List[float]] = []
+    actual_values: Optional[List[float]] = []
 
 class VerifyRunItem(BaseModel):
     id: int
@@ -116,10 +137,10 @@ class VerifyRunItem(BaseModel):
 class ProjectSaveRequest(BaseModel):
     name: str
     industry: str = "사출성형"
-    factors: List[FactorItem] = []
-    runs: List[RunItem] = []
+    factors: List[Dict[str, Any]] = []
+    runs: List[Dict[str, Any]] = []
     analysis_result: Optional[AnalysisResultModel] = None
-    verify_runs: List[VerifyRunItem] = []
+    verify_runs: Optional[List[Dict[str, Any]]] = None
 
 class ProjectUpdateRequest(ProjectSaveRequest):
     status: str = "completed"
@@ -243,11 +264,11 @@ def call_llm_action_guide(industry, top_factor, direction, gain, stat_summary):
     """
 
     # Try Gemini first
-    if GEMINI_API_KEY:
+    if GEMINI_API_KEY and genai:
         try:
             model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content(prompt)
-            if response and response.text:
+            if genai and response and response.text:
                 return response.text.strip(), "Gemini"
         except Exception as e:
             print(f"[Gemini Error] Fallback to AnythingLLM: {e}")
@@ -435,20 +456,28 @@ async def save_project(
 
         # 2. factors 저장
         if req.factors:
-            fac_rows = [
-                {"project_id": project_id, "key": f.key, "name": f.name,
-                 "min": f.min, "max": f.max,
-                 "unit": f.unit, "sort_order": i}
+            sb.table("factors").insert([
+                {
+                    "project_id": project_id,
+                    "key": f.get("key"),
+                    "name": f.get("name"),
+                    "min": f.get("min"),
+                    "max": f.get("max"),
+                    "unit": f.get("unit") or "",
+                    "sort_order": i
+                }
                 for i, f in enumerate(req.factors)
-            ]
-            sb.table("factors").insert(fac_rows).execute()
+            ]).execute()
 
         # 3. runs 저장
         if req.runs:
             run_rows = [
-                {"project_id": project_id, "run_order": r.runOrder,
-                 "factor_values": r.factor_values,
-                 "yield_val": float(r.yieldVal) if r.yieldVal not in ("", None) else None}
+                {
+                    "project_id": project_id,
+                    "run_order": r.get("runOrder") or r.get("run_order") or (i + 1),
+                    "factor_values": r.get("factor_values") or r.get("factors") or {},
+                    "yield_val": float(r.get("yieldVal") or r.get("yield_val")) if (r.get("yieldVal") or r.get("yield_val")) not in ("", None) else None
+                }
                 for i, r in enumerate(req.runs)
             ]
             sb.table("runs").insert(run_rows).execute()
@@ -464,9 +493,12 @@ async def save_project(
         # 5. verify_runs 저장
         if req.verify_runs:
             vr_rows = [
-                {"project_id": project_id, "run_order": v.id,
-                 "yield_val": float(v.yieldVal) if v.yieldVal not in ("", None) else None}
-                for v in req.verify_runs
+                {
+                    "project_id": project_id,
+                    "run_order": v.get("id") or v.get("run_order") or (i + 1),
+                    "yield_val": float(v.get("yieldVal") or v.get("yield_val")) if (v.get("yieldVal") or v.get("yield_val")) not in ("", None) else None
+                }
+                for i, v in enumerate(req.verify_runs)
             ]
             sb.table("verify_runs").insert(vr_rows).execute()
 
@@ -480,12 +512,87 @@ async def save_project(
         print(f"SAVE ERROR DETAIL:\n{error_detail}")
         raise HTTPException(status_code=500, detail=f"Database save error: {str(e)}")
 
+@app.post("/api/download-template")
+async def download_template_api(data: Dict[str, Any]):
+    try:
+        factors = data.get("factors", [])
+        runs = data.get("runs", [])
+        project_name = data.get("projectName", "DOE")
+        
+        output = io.BytesIO()
+        # XlsxWriter 엔진을 사용하여 상세 스타일 지정
+        writer = pd.ExcelWriter(output, engine='xlsxwriter')
+        workbook = writer.book
+        worksheet = workbook.add_worksheet('실험데이터_입력')
+        
+        # 스타일 정의
+        title_fmt = workbook.add_format({'bold': True, 'font_size': 14})
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center'})
+        input_col_fmt = workbook.add_format({'bg_color': '#E2EFDA', 'border': 1})
+        normal_fmt = workbook.add_format({'border': 1})
+        meta_fmt = workbook.add_format({'bold': True})
+        
+        # 1. 헤더 영역
+        worksheet.write(0, 0, 'DOE 실험 데이터 입력 템플릿 (Type 2)', title_fmt)
+        worksheet.write(1, 0, '프로젝트:', meta_fmt)
+        worksheet.write(1, 1, project_name)
+        worksheet.write(2, 0, '작성일시:', meta_fmt)
+        worksheet.write(2, 1, os.popen('date').read().strip())
+        
+        # 2. 인자 설정 정보
+        worksheet.write(4, 0, '[인자 설정 정보]', meta_fmt)
+        idx_hdr = ['인자명', '최소값(Min)', '최대값(Max)', '단위']
+        for col_num, val in enumerate(idx_hdr):
+            worksheet.write(5, col_num, val, header_fmt)
+        
+        for row_num, f in enumerate(factors):
+            worksheet.write(6 + row_num, 0, f.get('name', ''), normal_fmt)
+            worksheet.write(6 + row_num, 1, f.get('min', ''), normal_fmt)
+            worksheet.write(6 + row_num, 2, f.get('max', ''), normal_fmt)
+            worksheet.write(6 + row_num, 3, f.get('unit', ''), normal_fmt)
+            
+        # 3. 실험 데이터 입력 영역
+        start_row = 6 + len(factors) + 2
+        worksheet.write(start_row, 0, '[실험 데이터 입력 영역]', meta_fmt)
+        worksheet.write(start_row, 1, '(* 초록색 열에 수율 결과를 입력하세요)', workbook.add_format({'color': 'red', 'bold': True}))
+        
+        data_hdr = ['Run#'] + [f"{f.get('name')}({f.get('unit')})" for f in factors] + ['수율(Yield %)']
+        for col_num, val in enumerate(data_hdr):
+            worksheet.write(start_row + 1, col_num, val, header_fmt)
+            
+        for row_num, r in enumerate(runs):
+            curr_row = start_row + 2 + row_num
+            worksheet.write(curr_row, 0, r.get('runOrder', row_num + 1), normal_fmt)
+            fv = r.get('factor_values', {})
+            for col_idx, f in enumerate(factors):
+                worksheet.write(curr_row, col_idx + 1, fv.get(f.get('key'), ''), normal_fmt)
+            # 수율 입력 열 (요청하신 연한 녹색 적용)
+            worksheet.write(curr_row, len(factors) + 1, '', input_col_fmt)
+            
+        worksheet.set_column(0, len(data_hdr), 15)
+        writer.close()
+        output.seek(0)
+        
+        # 오늘 날짜로 파일명 구성
+        import datetime
+        date_str = datetime.datetime.now().strftime("%Y.%m.%d")
+        file_name = f"DOE_Excel_Template_{date_str}.xlsx"
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={file_name}"}
+        )
+    except Exception as e:
+        print(f"TEMPLATE DOWNLOAD ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ─── PUT /api/projects/{id} — 기존 프로젝트 업데이트 ─────────────────────────
 
 @app.put("/api/projects/{id}")
 async def update_project(
-    id: int, 
+    id: str, 
     req: ProjectUpdateRequest, 
     token: HTTPAuthorizationCredentials = Depends(auth_scheme),
     user: dict = Depends(get_current_user)
@@ -510,17 +617,26 @@ async def update_project(
 
         if req.factors:
             sb.table("factors").insert([
-                {"project_id": id, "key": f.key, "name": f.name,
-                 "min": f.min, "max": f.max,
-                 "unit": f.unit, "sort_order": i}
+                {
+                    "project_id": id,
+                    "key": f.get("key"),
+                    "name": f.get("name"),
+                    "min": f.get("min"),
+                    "max": f.get("max"),
+                    "unit": f.get("unit") or "",
+                    "sort_order": i
+                }
                 for i, f in enumerate(req.factors)
             ]).execute()
 
         if req.runs:
             sb.table("runs").insert([
-                {"project_id": id, "run_order": r.runOrder,
-                 "factor_values": r.factor_values,
-                 "yield_val": float(r.yieldVal) if r.yieldVal not in ("", None) else None}
+                {
+                    "project_id": id,
+                    "run_order": r.get("runOrder") or r.get("run_order") or (i + 1),
+                    "factor_values": r.get("factor_values") or r.get("factors") or {},
+                    "yield_val": float(r.get("yieldVal") or r.get("yield_val")) if (r.get("yieldVal") or r.get("yield_val")) not in ("", None) else None
+                }
                 for i, r in enumerate(req.runs)
             ]).execute()
 
@@ -533,8 +649,11 @@ async def update_project(
 
         if req.verify_runs:
             sb.table("verify_runs").insert([
-                {"project_id": id, "run_order": i+1,
-                 "yield_val": float(v.yieldVal) if v.yieldVal not in ("", None) else None}
+                {
+                    "project_id": id,
+                    "run_order": v.get("id") or v.get("run_order") or (i + 1),
+                    "yield_val": float(v.get("yieldVal") or v.get("yield_val")) if (v.get("yieldVal") or v.get("yield_val")) not in ("", None) else None
+                }
                 for i, v in enumerate(req.verify_runs)
             ]).execute()
 
@@ -664,3 +783,7 @@ async def delete_project(
 @app.get("/api/health")
 def health():
     return {"status": "ok", "db_connected": sb is not None}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

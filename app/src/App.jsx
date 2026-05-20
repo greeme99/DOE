@@ -81,7 +81,15 @@ export default function App() {
     const resp = await fetch(API + endpoint, config);
     if (!resp.ok) {
       const err = await resp.json();
-      throw new Error(err.detail || 'API Error');
+      const detail = err.detail;
+      const msg = typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map(d => `${d.loc?.join('.')} - ${d.msg}`).join('; ')
+          : typeof detail === 'object' && detail !== null
+            ? JSON.stringify(detail)
+            : (err.message || 'API Error');
+      throw new Error(msg);
     }
     return resp.json();
   };
@@ -107,6 +115,7 @@ export default function App() {
   const [showProjectPanel, setShowProjectPanel] = useState(false);
   const [projectList, setProjectList] = useState([]);
   const [compareIds, setCompareIds] = useState([]);
+  const [compareProjectDetails, setCompareProjectDetails] = useState([]);
   const [dbLoading, setDbLoading] = useState(false);
   const [dbMsg, setDbMsg] = useState('');
 
@@ -128,6 +137,24 @@ export default function App() {
   useEffect(() => { saveLS('projectName', projectName); }, [projectName]);
   useEffect(() => { saveLS('lang', lang); }, [lang]);
   useEffect(() => { if (dbMsg) { const t = setTimeout(() => setDbMsg(''), 4000); return () => clearTimeout(t); } }, [dbMsg]);
+
+  // compareIds 변경 시 상세 데이터(analysis_result 포함) 자동 로드
+  useEffect(() => {
+    if (compareIds.length === 0) { setCompareProjectDetails([]); return; }
+    const loadDetails = async () => {
+      const results = await Promise.allSettled(
+        compareIds.map(id => apiCall(`/api/projects/${id}`))
+      );
+      const validDetails = results
+        .filter(r => r.status === 'fulfilled')
+        .map(r => ({
+          ...r.value.project,
+          analysis_result: r.value.analysis_result
+        }));
+      setCompareProjectDetails(validDetails);
+    };
+    loadDetails();
+  }, [compareIds]);
 
   const handleIndustryChange = (ind) => {
     setIndustry(ind);
@@ -320,6 +347,45 @@ export default function App() {
     setExportLoading(false);
   };
 
+  const downloadTemplate = () => {
+    try {
+      if (!runs.length) { alert('실험표를 먼저 생성해주세요.'); return; }
+      setExportLoading(true);
+
+      const wb = XLSX.utils.book_new();
+      
+      // 1. 헤더 (Run#, 인자명(단위)..., 수율(%))
+      const dataHeader = [['Run#', ...factors.map(f => `${f.name}${f.unit ? `(${f.unit})` : ''}`), '수율(%)']];
+      
+      // 2. 데이터 행
+      const dataRows = runs.map(r => {
+        const fv = r.factor_values || {};
+        return [r.runOrder, ...factors.map(f => fv[f.key] ?? ''), ''];
+      });
+
+      const combinedData = [...dataHeader, ...dataRows];
+      const ws = XLSX.utils.aoa_to_sheet(combinedData);
+      
+      // 셀 너비 설정 (가독성 확보)
+      ws['!cols'] = [{ wch: 8 }, ...factors.map(() => ({ wch: 15 })), { wch: 12 }];
+
+      XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+      const now = new Date();
+      const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`;
+      const fileName = `DOE_Template_${dateStr}.xlsx`;
+
+      XLSX.writeFile(wb, fileName);
+      
+      console.log('[DOE Template] Simplified Template Generated:', fileName);
+    } catch (e) {
+      console.error('[DOE Template] ERROR:', e);
+      alert('템플릿 생성 중 오류가 발생했습니다: ' + e.message);
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
 
 
   const handleExcelUpload = (e) => {
@@ -383,7 +449,7 @@ export default function App() {
       // 데이터 정제: 백엔드 모델(VerifyRunItem) 규격에 맞게 변환
       const sanitizedVerifyRuns = verifyRuns.map(v => ({
         id: Number(v.id),
-        yieldVal: v.yieldVal !== null && v.yieldVal !== undefined ? String(v.yieldVal) : ""
+        yieldVal: (v.yieldVal !== null && v.yieldVal !== undefined && v.yieldVal !== "") ? Number(v.yieldVal) : null
       }));
 
       // JSON 직렬화 시 오류 유발 가능한 값(NaN, Infinity)을 null로 치환하는 Deep Clean
@@ -406,13 +472,14 @@ export default function App() {
       if (!projectId) {
         setProjectId(res.id);
         saveLS('projectId', res.id);
-        setProjectName(payload.name);
-        saveLS('projectName', payload.name);
+        setProjectName(cleanPayload.name);
+        saveLS('projectName', cleanPayload.name);
       }
       setDbMsg('✓ Saved to Cloud');
     } catch (err) {
       console.error('Save Project Error:', err);
-      setDbMsg(`✗ Save failed: ${err.message}`);
+      const errMsg = err?.message || String(err) || '알 수 없는 오류';
+      setDbMsg(`✗ Save failed: ${errMsg}`);
     }
     setDbLoading(false);
   };
@@ -421,9 +488,9 @@ export default function App() {
     setDbLoading(true);
     try {
       const res = await apiCall('/api/projects');
-      setProjectList(res.projects);
-    } catch {
-      setDbMsg('✗ Load List failed');
+      setProjectList(res?.projects || []);
+    } catch (err) {
+      setDbMsg(`✗ Load List failed: ${err?.message || '목록 조회 오류'}`);
     }
     setDbLoading(false);
   };
@@ -449,14 +516,15 @@ export default function App() {
   };
 
   const deleteProject = async (id, name) => {
-    if (!window.confirm(`"${name}"을 삭제하시겠습니까?`)) return;
     try {
       await apiCall(`/api/projects/${id}`, 'DELETE');
+      // compareIds에서 삭제된 ID 제거
+      setCompareIds(prev => prev.filter(cid => cid !== id));
       loadProjectList();
       if (projectId === id) handleReset();
       setDbMsg(`✓ "${name}" 삭제 완료`);
-    } catch {
-      setDbMsg('✗ Delete failed');
+    } catch (err) {
+      setDbMsg(`✗ Delete failed: ${err?.message || '삭제 오류'}`);
     }
   };
 
@@ -496,7 +564,7 @@ export default function App() {
         return <ExperimentTable
           t={t}
           runs={runs} factors={factors} completedCount={completedCount} totalRuns={totalRuns}
-          downloadExcel={exportFullReport} excelRef={excelRef}
+          downloadExcel={downloadTemplate} excelRef={excelRef}
           updateYield={updateYield} runAnalysis={runAnalysis} isLoading={isLoading}
           canAnalyze={canAnalyze} hasYieldErrors={hasYieldErrors}
           validateYield={validateYield} isValidYield={isValidYield}
@@ -533,7 +601,7 @@ export default function App() {
       case 7:
         return <ComparisonPanel
           t={t}
-          projectList={projectList}
+          projectList={compareProjectDetails}
           compareIds={compareIds}
         />;
       default: return null;
@@ -677,11 +745,12 @@ export default function App() {
       <input ref={verifyExcelRef} type="file" accept=".xlsx,.xls" onChange={handleVerifyUpload} style={{ display: 'none' }} />
 
       <ProjectVault
+        t={t}
         showProjectPanel={showProjectPanel} setShowProjectPanel={setShowProjectPanel}
         projectName={projectName} setProjectName={setProjectName}
         saveProject={saveProject} dbLoading={dbLoading} runs={runs}
         projectId={projectId} industry={industry} loadProjectList={loadProjectList}
-        projectList={projectList} loadProjectDetail={loadProjectDetail}
+        projectList={projectList || []} loadProjectDetail={loadProjectDetail}
         deleteProject={deleteProject}
         compareIds={compareIds}
         toggleCompare={toggleCompare}
