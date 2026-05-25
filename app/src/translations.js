@@ -120,6 +120,12 @@ export const translations = {
       analysis: '분석 요약',
       optimize: '최적 조건',
       verify: '검증 실험'
+    },
+    error: {
+      backend: '백엔드 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+      backendWarmup: '서버가 시작 중입니다 (최초 실행 시 약 30~60초 소요). 잠시 후 다시 시도해 주세요.',
+      analysis: '분석 중 오류가 발생했습니다. 데이터를 확인하고 다시 시도해 주세요.',
+      timeout: '요청 시간이 초과되었습니다. 서버가 시작 중일 수 있습니다. 30초 후 다시 시도해 주세요.'
     }
   },
   en: {
@@ -243,6 +249,12 @@ export const translations = {
       analysis: 'Analysis Summary',
       optimize: 'Optimization',
       verify: 'Verification'
+    },
+    error: {
+      backend: 'Cannot connect to the backend server. Please try again in a moment.',
+      backendWarmup: 'Server is starting up (first run may take 30–60 seconds). Please try again shortly.',
+      analysis: 'An error occurred during analysis. Please check your data and try again.',
+      timeout: 'Request timed out. The server may be warming up. Please try again in 30 seconds.'
     }
   }
 };

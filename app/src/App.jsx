@@ -66,8 +66,8 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // API Call Wrapper with Auth
-  const apiCall = async (endpoint, method = 'GET', body = null) => {
+  // API Call Wrapper with Auth (타임아웃 60s 적용)
+  const apiCall = async (endpoint, method = 'GET', body = null, timeoutMs = 60000) => {
     const headers = {
       'Content-Type': 'application/json',
     };
@@ -78,20 +78,34 @@ export default function App() {
     const config = { method, headers };
     if (body) config.body = JSON.stringify(body);
 
-    const resp = await fetch(API + endpoint, config);
-    if (!resp.ok) {
-      const err = await resp.json();
-      const detail = err.detail;
-      const msg = typeof detail === 'string'
-        ? detail
-        : Array.isArray(detail)
-          ? detail.map(d => `${d.loc?.join('.')} - ${d.msg}`).join('; ')
-          : typeof detail === 'object' && detail !== null
-            ? JSON.stringify(detail)
-            : (err.message || 'API Error');
-      throw new Error(msg);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const resp = await fetch(API + endpoint, { ...config, signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        const detail = err.detail;
+        const msg = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map(d => `${d.loc?.join('.')} - ${d.msg}`).join('; ')
+            : typeof detail === 'object' && detail !== null
+              ? JSON.stringify(detail)
+              : (err.message || 'API Error');
+        throw new Error(msg);
+      }
+      return resp.json();
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        const timeoutErr = new Error('timeout');
+        timeoutErr.isTimeout = true;
+        throw timeoutErr;
+      }
+      throw err;
     }
-    return resp.json();
   };
 
   const [currentTab, setCurrentTab] = useState(() => {
@@ -181,11 +195,17 @@ export default function App() {
   const generateRuns = async () => {
     setIsLoading(true);
     try {
-      const d = await apiCall('/api/design/generate', 'POST', { factors });
+      const d = await apiCall('/api/design/generate', 'POST', { factors }, 60000);
       setRuns(d.runs);
       setCurrentTab(2);
-    } catch {
-      alert(t('error.backend') || '백엔드 서버 오류');
+    } catch (err) {
+      if (err.isTimeout || err.name === 'AbortError') {
+        alert(t('error.timeout') || '요청 시간이 초과되었습니다. 서버가 시작 중일 수 있습니다. 30초 후 다시 시도해 주세요.');
+      } else if (err.message && err.message.includes('fetch')) {
+        alert(t('error.backendWarmup') || '서버가 시작 중입니다. 잠시 후 다시 시도해 주세요.');
+      } else {
+        alert(t('error.backend') || '백엔드 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.');
+      }
     }
     setIsLoading(false);
   };
@@ -197,7 +217,7 @@ export default function App() {
         runs: runs.map(r => ({ ...r, yieldVal: parseFloat(r.yieldVal) })),
         factors,
       };
-      const d = await apiCall(`/api/analyze?industry=${encodeURIComponent(industry)}`, 'POST', payload);
+      const d = await apiCall(`/api/analyze?industry=${encodeURIComponent(industry)}`, 'POST', payload, 90000);
       setAnalysisResult(d);
       setCurrentTab(3);
 
@@ -209,8 +229,12 @@ export default function App() {
           }
         }, 500);
       }
-    } catch {
-      alert(t('error.analysis') || '분석 중 오류가 발생했습니다.');
+    } catch (err) {
+      if (err.isTimeout || err.name === 'AbortError') {
+        alert(t('error.timeout') || '요청 시간이 초과되었습니다. 서버가 시작 중일 수 있습니다. 30초 후 다시 시도해 주세요.');
+      } else {
+        alert(t('error.analysis') || '분석 중 오류가 발생했습니다. 데이터를 확인하고 다시 시도해 주세요.');
+      }
     }
     setIsLoading(false);
   };
