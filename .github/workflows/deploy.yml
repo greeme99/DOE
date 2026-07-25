@@ -34,9 +34,26 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
+      - name: Prepare deploy structure
+        run: |
+          mkdir -p deploy/doe
+          cp -r app/dist/. deploy/doe/
+          touch deploy/.nojekyll
+          cat > deploy/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta http-equiv="refresh" content="0;url=/DOE/doe/">
+            <script>window.location.replace('/DOE/doe/');</script>
+          </head>
+          <body></body>
+          </html>
+          EOF
+
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: app/dist
+          publish_dir: deploy
           publish_branch: gh-pages

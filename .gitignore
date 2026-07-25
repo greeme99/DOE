@@ -32,4 +32,10 @@ Thumbs.db
 *.xlsx
 ~$*.xlsx
 scratch/
-app/package-lock 2.json
+*.tgz
+*package-lock*.json
+!package-lock.json
+
+# Vite / Build cache
+app/node_modules/.vite/
+.vite/
