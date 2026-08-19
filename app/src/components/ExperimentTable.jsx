@@ -38,6 +38,22 @@ export default function ExperimentTable({
 
           <div className="flex flex-wrap items-center gap-2">
             <button
+              onClick={() => {
+                runs.forEach((r, idx) => {
+                  // 인자 값 조합에 따른 현실적인 샘플 수율 생성 (75 ~ 96%)
+                  const base = 82;
+                  const fSum = Object.values(r.factor_values).reduce((a, b) => a + Number(b), 0);
+                  const val = roundVal(base + (fSum % 14) + (idx % 3) * 1.5);
+                  updateYield(r.id, String(val));
+                });
+                function roundVal(v) { return Math.min(98.5, Math.max(65.0, Math.round(v * 10) / 10)); }
+              }}
+              className="flex items-center gap-1.5 bg-yellow-400/20 text-yellow-800 dark:text-yellow-300 border border-yellow-400/40 px-3 py-2 rounded-xl font-bold text-xs hover:bg-yellow-400/30 transition shadow-sm"
+              title="프로토타입 시연을 위한 가상 수율 데이터 자동 채우기"
+            >
+              ⚡ 샘플 데이터 자동 채우기
+            </button>
+            <button
               onClick={downloadExcel}
               className="flex items-center gap-1.5 border border-gray-300 dark:border-gray-600 text-theme-main px-4 py-2.5 rounded-xl font-bold text-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition shadow-sm"
             >
@@ -114,8 +130,20 @@ export default function ExperimentTable({
                         <input
                           type="number"
                           placeholder="0~100"
+                          data-yield-id={r.id}
                           value={r.yieldVal}
                           onChange={e => updateYield(r.id, e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === 'ArrowDown') {
+                              e.preventDefault();
+                              const nextInput = document.querySelector(`input[data-yield-id="${r.id + 1}"]`);
+                              if (nextInput) nextInput.focus();
+                            } else if (e.key === 'ArrowUp') {
+                              e.preventDefault();
+                              const prevInput = document.querySelector(`input[data-yield-id="${r.id - 1}"]`);
+                              if (prevInput) prevInput.focus();
+                            }
+                          }}
                           className={`w-24 p-2 text-right border rounded-lg bg-theme-card font-black text-theme-main focus:ring-2 focus:ring-blue-500 outline-none transition ${
                             validateYield(r.yieldVal) ? 'border-red-400' : 'border-theme group-hover:border-gray-400'
                           }`}

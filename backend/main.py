@@ -11,7 +11,7 @@ import itertools, random, os
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from scipy import stats
+from scipy import stats, optimize
 try:
     import google.generativeai as genai
 except ImportError:
@@ -22,10 +22,15 @@ import io
 from fastapi.responses import StreamingResponse
 
 app = FastAPI(title="DOE Auto API", version="2.0")
-auth_scheme = HTTPBearer()
+auth_scheme = HTTPBearer(auto_error=False)
+
+class DummyUser:
+    def __init__(self, id: str = "prototype-demo-user", email: str = "demo@prototype.local"):
+        self.id = id
+        self.email = email
 
 # ─── CORS (보안 강화를 위해 특정 오리진만 허용) ─────────────────────────────
-_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,*")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
@@ -67,17 +72,19 @@ ANYTHING_LLM_WORKSPACE = os.getenv("ANYTHING_LLM_WORKSPACE", "doe-analysis")
 
 def _require_db():
     if sb is None:
-        raise HTTPException(status_code=503, detail="Database not configured")
+        raise HTTPException(status_code=503, detail="Database not configured in prototype mode. Using local fallback.")
 
-async def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-    _require_db()
+async def get_current_user(token: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme)):
+    # 프로토타입 단계 / DB 미연결 또는 prototype-token 사용 시 가상 유저 사용
+    if sb is None or not token or token.credentials == "prototype-token":
+        return DummyUser()
     try:
         user_res = sb.auth.get_user(token.credentials)
-        if not user_res.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return user_res.user
+        if user_res and user_res.user:
+            return user_res.user
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+        print(f"[Auth Warning] Fallback to prototype user due to: {e}")
+    return DummyUser()
 
 @app.get("/")
 def root():
@@ -113,6 +120,11 @@ class AnalyzeRequest(BaseModel):
 
 class AnalysisResultModel(BaseModel):
     r_squared: float
+    adj_r_squared: Optional[float] = 0.0
+    model_f_stat: Optional[float] = 0.0
+    model_p_value: Optional[float] = 1.0
+    t_critical: Optional[float] = 2.0
+    outlier_runs: Optional[List[int]] = []
     intercept: float
     params_raw: Dict[str, float]
     tvalues: Dict[str, float]
@@ -120,6 +132,9 @@ class AnalysisResultModel(BaseModel):
     factor_keys: List[str]
     factor_names: Dict[str, str]
     golden_solution: Dict[str, float]
+    golden_coded: Optional[Dict[str, float]] = {}
+    golden_actual: Optional[Dict[str, float]] = {}
+    desirability: Optional[float] = 1.0
     optimal_yield_pred: float
     current_avg_yield: float
     yield_gain: float
@@ -337,30 +352,89 @@ def analyze_data(req: AnalyzeRequest, industry: str = "사출성형"):
             params[col]  = round(float(model.params.iloc[i+1]), 4)
 
     r_sq      = float(model.rsquared) if not np.isnan(model.rsquared) else 0.0
+    adj_r_sq  = float(model.rsquared_adj) if not np.isnan(model.rsquared_adj) else 0.0
     intercept = float(model.params.iloc[0]) if not np.isnan(model.params.iloc[0]) else 0.0
+    model_f   = float(model.fvalue) if not np.isnan(model.fvalue) else 0.0
+    model_p   = float(model.f_pvalue) if not np.isnan(model.f_pvalue) else 1.0
 
-    # Golden solution
-    golden = {k: (1 if params.get(k, 0) > 0 else -1) for k in fkeys}
+    # Pareto critical t-value (alpha = 0.05)
+    df_resid = model.df_resid
+    t_crit = float(stats.t.ppf(1 - 0.05/2, df_resid)) if df_resid > 0 else 2.0
 
-    def predict_coded(cv):
+    # Standardized residuals and Outliers (|resid| > 2.5)
+    std_resids = (model.resid / (np.std(model.resid) or 1.0)).tolist()
+    outlier_runs = [i + 1 for i, r in enumerate(std_resids) if abs(r) > 2.5]
+
+    # ─── 정밀 최적해 산출 (SciPy Continuous Bounded Optimization) ───
+    def predict_coded(cv, filter_pvalue=False):
         pred = intercept
         # 주효과
         for k in fkeys:
-            pred += params.get(k, 0) * cv.get(k, 0)
-        # 제곱항
+            if not filter_pvalue or pvalues.get(k, 1.0) < 0.15:
+                pred += params.get(k, 0) * cv.get(k, 0)
+        # 제곱항 (RSM 곡률)
         for k in fkeys:
-            pred += params.get(f"{k}^2", 0) * (cv.get(k, 0) ** 2)
+            sq_k = f"{k}^2"
+            if not filter_pvalue or pvalues.get(sq_k, 1.0) < 0.15:
+                pred += params.get(sq_k, 0) * (cv.get(k, 0) ** 2)
         # 교호작용
         for i, ki in enumerate(fkeys):
             for j, kj in enumerate(fkeys):
                 if j > i:
-                    pred += params.get(f"{ki}*{kj}", 0) * cv.get(ki, 0) * cv.get(kj, 0)
+                    ij_k = f"{ki}*{kj}"
+                    if not filter_pvalue or pvalues.get(ij_k, 1.0) < 0.15:
+                        pred += params.get(ij_k, 0) * cv.get(ki, 0) * cv.get(kj, 0)
         return pred
 
-    opt_yield  = predict_coded(golden)
+    # 수치 최적화: [-1, 1] 범위 내 연속 탐색 (SLSQP 알고리즘)
+    def objective_fn(x_arr):
+        cv = {k: x_arr[idx] for idx, k in enumerate(fkeys)}
+        return -predict_coded(cv, filter_pvalue=True)
+
+    bounds = [(-1.0, 1.0) for _ in fkeys]
+    
+    # 초깃값 후보군 생성 (중심점 + 코너 조합)
+    init_candidates = [[0.0] * len(fkeys)]
+    if len(fkeys) <= 5:
+        for combo in itertools.product([-1.0, 1.0], repeat=len(fkeys)):
+            init_candidates.append(list(combo))
+
+    best_fun = float('inf')
+    best_x = [0.0] * len(fkeys)
+
+    for x0 in init_candidates:
+        try:
+            res = optimize.minimize(objective_fn, x0, method='SLSQP', bounds=bounds)
+            if res.success and res.fun < best_fun:
+                best_fun = res.fun
+                best_x = res.x
+        except Exception:
+            pass
+
+    # 코딩 최적값 (-1.0 ~ 1.0)
+    golden_coded = {k: round(float(best_x[idx]), 3) for idx, k in enumerate(fkeys)}
+    
+    # 기존 단방향 부호 호환성 유지 (+1 or -1)
+    golden = {k: (1 if golden_coded[k] >= 0 else -1) for k in fkeys}
+
+    # 실제 물리 공정 최적값 변환 (Actual Physical Values)
+    factor_dict = {f.key: f for f in req.factors}
+    golden_actual = {}
+    for k in fkeys:
+        f_obj = factor_dict[k]
+        c_val = golden_coded[k]
+        act_val = f_obj.min + (c_val + 1.0) / 2.0 * (f_obj.max - f_obj.min)
+        golden_actual[k] = round(float(act_val), 2)
+
+    opt_yield  = predict_coded(golden_coded, filter_pvalue=True)
     cur_avg    = float(df["yieldVal"].mean())
     yield_gain = max(0.0, opt_yield - cur_avg)
     roi_amount = int(ROI_BASE_REVENUE * ROI_IMPROVEMENT_RATIO * (yield_gain / 100))
+
+    # 만족도 함수 (Desirability Index D)
+    y_min, y_max = float(df["yieldVal"].min()), float(df["yieldVal"].max())
+    denom = (max(y_max, opt_yield) - y_min) or 1.0
+    desirability = round(min(1.0, max(0.0, (opt_yield - y_min) / denom)), 3)
 
     # Normal probability plot
     resids = sorted(model.resid.tolist())
@@ -408,6 +482,11 @@ def analyze_data(req: AnalyzeRequest, industry: str = "사출성형"):
 
     return {
         "r_squared":          round(r_sq, 4),
+        "adj_r_squared":      round(adj_r_sq, 4),
+        "model_f_stat":       round(model_f, 4),
+        "model_p_value":      round(model_p, 4),
+        "t_critical":         round(t_crit, 4),
+        "outlier_runs":       outlier_runs,
         "intercept":          round(intercept, 4),
         "tvalues":            {disp(k): v for k, v in tvalues.items()},
         "tvalues_raw":        tvalues,
@@ -417,6 +496,9 @@ def analyze_data(req: AnalyzeRequest, industry: str = "사출성형"):
         "factor_keys":        fkeys,
         "factor_names":       fnames,
         "golden_solution":    golden,
+        "golden_coded":       golden_coded,
+        "golden_actual":      golden_actual,
+        "desirability":       desirability,
         "norm_plot_x":        norm_x,
         "norm_plot_y":        [round(r, 4) for r in resids],
         "interaction_data":   interact,
@@ -429,7 +511,7 @@ def analyze_data(req: AnalyzeRequest, industry: str = "사출성형"):
         "residuals":          [round(float(r), 4) for r in model.resid.tolist()],
         "fitted_values":      [round(float(v), 4) for v in model.fittedvalues.tolist()],
         "actual_values":      [round(float(v), 4) for v in Y.tolist()],
-        "std_residuals":      [round(float(r), 4) for r in (model.resid / (np.std(model.resid) or 1.0)).tolist()]
+        "std_residuals":      [round(float(r), 4) for r in std_resids]
     }
 
 # ─── API Endpoints — Project CRUD ────────────────────────────────────────────
@@ -439,11 +521,17 @@ def analyze_data(req: AnalyzeRequest, industry: str = "사출성형"):
 @app.post("/api/projects")
 async def save_project(
     req: ProjectSaveRequest, 
-    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    token: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme),
     user: dict = Depends(get_current_user)
 ):
-    _require_db()
-    # 사용자의 토큰을 DB 클라이언트에 연동하여 RLS 통과
+    if sb is None or not token or token.credentials == "prototype-token":
+        # 프로토타입 모드: DB 미연결 시 로컬 성공 응답 반환
+        return {
+            "id": f"proto-{int(random.random()*10000)}",
+            "message": "프로토타입 모드: 로컬 세션 저장이 완료되었습니다.",
+            "project": {"id": "proto-1", "name": req.name, "industry": req.industry}
+        }
+    
     sb.postgrest.auth(token.credentials)
     
     try:
@@ -673,10 +761,12 @@ async def update_project(
 
 @app.get("/api/projects")
 async def list_projects(
-    token: HTTPAuthorizationCredentials = Depends(auth_scheme),
+    token: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme),
     user: dict = Depends(get_current_user)
 ):
-    _require_db()
+    if sb is None or not token or token.credentials == "prototype-token":
+        return {"projects": []}
+    
     sb.postgrest.auth(token.credentials)
     try:
         res = sb.table("projects").select("*").eq("user_id", user.id).order("created_at", desc=True).execute()

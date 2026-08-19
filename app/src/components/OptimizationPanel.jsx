@@ -28,11 +28,16 @@ export default function OptimizationPanel({
         <p className="text-theme-muted mb-10">{t('optimization.desc')}</p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
-          {/* Predicted Yield */}
+          {/* Predicted Yield & Desirability */}
           <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-8 rounded-3xl shadow-xl flex flex-col items-center justify-center relative overflow-hidden group animate-slide-up">
             <div className="absolute top-0 right-0 p-4 opacity-20 group-hover:scale-110 transition animate-float"><TrendingUp size={80} className="text-white" /></div>
             <span className="text-[10px] font-black text-blue-100 uppercase tracking-widest mb-2 relative z-10">{t('optimization.predictedYield')}</span>
-            <div className="text-6xl font-black text-white relative z-10 drop-shadow-lg">{predictedYield}%</div>
+            <div className="text-5xl font-black text-white relative z-10 drop-shadow-lg">{predictedYield}%</div>
+            {analysisResult.desirability !== undefined && (
+              <span className="mt-3 px-3 py-1 bg-white/20 backdrop-blur-md rounded-full text-xs font-bold text-blue-50 relative z-10 border border-white/30">
+                만족도 (Desirability): {(analysisResult.desirability * 100).toFixed(1)}%
+              </span>
+            )}
           </div>
 
           {/* ROI */}
@@ -45,15 +50,32 @@ export default function OptimizationPanel({
 
           {/* Optimal Conditions */}
           <div className="bg-theme-card p-8 rounded-3xl shadow-xl border-2 border-theme lg:col-span-1 md:col-span-2 animate-slide-up glass" style={{ animationDelay: '0.2s' }}>
-            <span className="text-[10px] font-black text-theme-muted uppercase tracking-widest mb-6 block">Optimal Parameters</span>
+            <div className="flex items-center justify-between mb-6">
+              <span className="text-[10px] font-black text-theme-muted uppercase tracking-widest">Optimal Parameters</span>
+              <span className="text-[10px] bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 font-bold px-2 py-0.5 rounded-full">
+                SciPy SLSQP Continuous
+              </span>
+            </div>
             <div className="space-y-4">
               {factors.map(f => {
-                const isMax = analysisResult.golden_solution[f.key] === 1;
+                const hasActual = analysisResult.golden_actual && analysisResult.golden_actual[f.key] !== undefined;
+                const displayVal = hasActual
+                  ? analysisResult.golden_actual[f.key]
+                  : (analysisResult.golden_solution?.[f.key] === 1 ? f.max : f.min);
+                const codedVal = analysisResult.golden_coded?.[f.key];
+
                 return (
                   <div key={f.key} className="flex justify-between items-center bg-theme-inset px-5 py-3 rounded-2xl border border-theme card-hover">
-                    <span className="text-sm font-black text-theme-main">{f.name}</span>
-                    <span className={`text-base font-black ${isMax ? 'text-emerald-500' : 'text-blue-500'}`}>
-                      {isMax ? f.max : f.min} <span className="text-[10px] opacity-60 ml-0.5">{f.unit}</span>
+                    <div className="flex flex-col">
+                      <span className="text-sm font-black text-theme-main">{f.name}</span>
+                      {codedVal !== undefined && (
+                        <span className="text-[9px] text-theme-muted font-mono opacity-70">
+                          Coded: {codedVal > 0 ? `+${codedVal}` : codedVal}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-base font-black text-emerald-500">
+                      {displayVal} <span className="text-[10px] opacity-60 ml-0.5">{f.unit}</span>
                     </span>
                   </div>
                 );

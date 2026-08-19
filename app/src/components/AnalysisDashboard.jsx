@@ -87,6 +87,41 @@ export default function AnalysisDashboard({
         </p>
       </div>
 
+      {/* Minitab급 통계 적합도 요약 카드 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="bg-theme-card p-4 rounded-2xl border border-theme flex flex-col">
+          <span className="text-[10px] font-bold text-theme-muted uppercase tracking-wider">결정계수 (R-Sq)</span>
+          <span className="text-2xl font-black text-theme-main">{r_sq_display}%</span>
+        </div>
+        <div className="bg-theme-card p-4 rounded-2xl border border-theme flex flex-col">
+          <span className="text-[10px] font-bold text-theme-muted uppercase tracking-wider">수정 결정계수 (R-Sq adj)</span>
+          <span className="text-2xl font-black text-blue-600 dark:text-blue-400">
+            {((analysisResult.adj_r_squared || analysisResult.r_squared) * 100).toFixed(1)}%
+          </span>
+        </div>
+        <div className="bg-theme-card p-4 rounded-2xl border border-theme flex flex-col">
+          <span className="text-[10px] font-bold text-theme-muted uppercase tracking-wider">모델 F-값 (F-Statistic)</span>
+          <span className="text-2xl font-black text-indigo-600 dark:text-indigo-400">
+            {analysisResult.model_f_stat !== undefined ? analysisResult.model_f_stat : '--'}
+          </span>
+        </div>
+        <div className="bg-theme-card p-4 rounded-2xl border border-theme flex flex-col">
+          <span className="text-[10px] font-bold text-theme-muted uppercase tracking-wider">모델 유의성 (p-value)</span>
+          <span className={`text-2xl font-black ${(analysisResult.model_p_value ?? 1.0) < 0.05 ? 'text-emerald-500' : 'text-amber-500'}`}>
+            {(analysisResult.model_p_value ?? 1.0) < 0.001 ? '< 0.001' : (analysisResult.model_p_value ?? 1.0).toFixed(3)}
+          </span>
+        </div>
+      </div>
+
+      {/* 이상치 경고 노티스 */}
+      {analysisResult.outlier_runs && analysisResult.outlier_runs.length > 0 && (
+        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-4 rounded-xl flex items-center gap-3">
+          <span className="text-amber-600 dark:text-amber-400 font-bold text-sm">
+            ⚠️ 현장 측정 이상치 경고: Run #{analysisResult.outlier_runs.join(', #')} (표준화 잔차 &gt; 2.5) — 데이터 재측정 또는 이상 원인 점검을 권장합니다.
+          </span>
+        </div>
+      )}
+
       {/* AI 진단 */}
       <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/40 dark:to-indigo-900/40 border border-blue-100 dark:border-blue-800 p-6 md:p-8 rounded-3xl shadow-xl relative overflow-hidden animate-slide-up glass">
         <div className="absolute -right-4 -top-4 opacity-20 animate-float"><Zap size={160} className="text-blue-400" /></div>
@@ -110,13 +145,40 @@ export default function AnalysisDashboard({
           <h3 className="text-base font-bold text-theme-main mb-1 flex items-center gap-2">
             <BarChart2 size={18} className="text-[--color-primary]" /> {t('analysisDashboard.pareto')}
           </h3>
-          <p className="text-xs text-theme-muted mb-3">유의 기준선 2.1 초과(빨강) = 통계적으로 유의함</p>
+          <p className="text-xs text-theme-muted mb-3">
+            유의 임계선 t_crit = {(analysisResult.t_critical || 2.1).toFixed(2)} 초과(빨강) = 통계적으로 유의함 (α=0.05)
+          </p>
           <div className="h-64 md:h-72 w-full">
-            <Plot
-              data={[{ type: 'bar', x: paretoData.map(d => d.v), y: paretoData.map(d => d.k), orientation: 'h', marker: { color: paretoData.map(d => d.v >= 2.1 ? '#EF4444' : '#9CA3AF') } }]}
-              layout={{ autosize: true, margin: { l: 90, r: 20, t: 10, b: 40 }, xaxis: { title: '|t-value|' }, shapes: [{ type: 'line', x0: 2.1, x1: 2.1, y0: -0.5, y1: paretoData.length - 0.5, line: { color: 'red', dash: 'dash', width: 2 } }], paper_bgcolor: 'transparent', plot_bgcolor: 'transparent' }}
-              useResizeHandler style={{ width: '100%', height: '100%' }} config={{ displayModeBar: false }}
-            />
+            {(() => {
+              const tCrit = analysisResult.t_critical || 2.1;
+              return (
+                <Plot
+                  data={[{
+                    type: 'bar',
+                    x: paretoData.map(d => d.v),
+                    y: paretoData.map(d => d.k),
+                    orientation: 'h',
+                    marker: { color: paretoData.map(d => d.v >= tCrit ? '#EF4444' : '#9CA3AF') }
+                  }]}
+                  layout={{
+                    autosize: true,
+                    margin: { l: 90, r: 20, t: 10, b: 40 },
+                    xaxis: { title: '|t-value|' },
+                    shapes: [{
+                      type: 'line',
+                      x0: tCrit,
+                      x1: tCrit,
+                      y0: -0.5,
+                      y1: paretoData.length - 0.5,
+                      line: { color: '#EF4444', dash: 'dash', width: 2 }
+                    }],
+                    paper_bgcolor: 'transparent',
+                    plot_bgcolor: 'transparent'
+                  }}
+                  useResizeHandler style={{ width: '100%', height: '100%' }} config={{ displayModeBar: false }}
+                />
+              );
+            })()}
           </div>
         </div>
 

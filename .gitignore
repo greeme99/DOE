@@ -39,3 +39,9 @@ scratch/
 # Vite / Build cache
 app/node_modules/.vite/
 .vite/
+
+# Antigravity Harness additions
+﻿LAUDE.local.md
+.agents/settings.local.json
+.env.*
+!.env.example

@@ -49,22 +49,42 @@ export default function App() {
     return obj;
   };
 
-  const [session, setSession] = useState(null);
-  const [user, setUser] = useState(null);
+  // 프로토타입 단계: VITE_ENABLE_AUTH가 'true'가 아닌 경우 인증 화면 우회 (기본 데모 세션 사용)
+  const isAuthEnabled = import.meta.env.VITE_ENABLE_AUTH === 'true';
+  const PROTOTYPE_SESSION = {
+    user: { id: 'prototype-demo-user', email: 'demo@prototype.local' },
+    access_token: 'prototype-token'
+  };
+
+  const [session, setSession] = useState(() => isAuthEnabled ? null : PROTOTYPE_SESSION);
+  const [user, setUser] = useState(() => isAuthEnabled ? null : PROTOTYPE_SESSION.user);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
+    supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
+      if (currentSession) {
+        setSession(currentSession);
+        setUser(currentSession.user);
+      } else if (!isAuthEnabled) {
+        setSession(PROTOTYPE_SESSION);
+        setUser(PROTOTYPE_SESSION.user);
+      }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      if (currentSession) {
+        setSession(currentSession);
+        setUser(currentSession.user);
+      } else if (!isAuthEnabled) {
+        setSession(PROTOTYPE_SESSION);
+        setUser(PROTOTYPE_SESSION.user);
+      } else {
+        setSession(null);
+        setUser(null);
+      }
     });
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [isAuthEnabled]);
 
   // API Call Wrapper with Auth (타임아웃 60s 적용)
   const apiCall = async (endpoint, method = 'GET', body = null, timeoutMs = 60000) => {
@@ -659,10 +679,15 @@ export default function App() {
           </div>
           <div className="flex flex-col gap-3 w-full">
             <div className="hidden md:flex flex-col items-start gap-1">
-              <span className="text-[10px] opacity-60 flex items-center gap-1"><User size={10}/> {user?.email}</span>
-              <button onClick={() => supabase.auth.signOut()} className="text-[10px] font-bold text-red-200 hover:text-red-100 flex items-center gap-1">
-                <LogOut size={10} /> {t('auth.logout') || 'Logout'}
-              </button>
+              <span className="text-[10px] opacity-80 flex items-center gap-1 font-mono">
+                <User size={10}/> {user?.email}
+                {!isAuthEnabled && <span className="bg-yellow-400 text-blue-950 font-sans font-bold px-1.5 py-0.5 rounded text-[9px] ml-1">PROTOTYPE</span>}
+              </span>
+              {isAuthEnabled && (
+                <button onClick={() => supabase.auth.signOut()} className="text-[10px] font-bold text-red-200 hover:text-red-100 flex items-center gap-1">
+                  <LogOut size={10} /> {t('auth.logout') || 'Logout'}
+                </button>
+              )}
             </div>
             
             <div className="flex items-center gap-2">
