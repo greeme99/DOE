@@ -86,8 +86,14 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, [isAuthEnabled]);
 
-  // API Call Wrapper with Auth (타임아웃 60s 적용)
-  const apiCall = async (endpoint, method = 'GET', body = null, timeoutMs = 60000) => {
+  // ─── 백엔드 백그라운드 자동 웜업 핑 ──────────────────────────────────────────
+  useEffect(() => {
+    // 앱 진입 시 Render Cold Start 대비 백그라운드 핑 전송
+    fetch(API + '/api/health').catch(() => {});
+  }, []);
+
+  // API Call Wrapper with Auth & Auto Retry (Cold Start 대비 최대 3회 재시도)
+  const apiCall = async (endpoint, method = 'GET', body = null, timeoutMs = 60000, retries = 3, retryDelayMs = 4000) => {
     const headers = {
       'Content-Type': 'application/json',
     };
@@ -98,33 +104,47 @@ export default function App() {
     const config = { method, headers };
     if (body) config.body = JSON.stringify(body);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    try {
-      const resp = await fetch(API + endpoint, { ...config, signal: controller.signal });
-      clearTimeout(timer);
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        const detail = err.detail;
-        const msg = typeof detail === 'string'
-          ? detail
-          : Array.isArray(detail)
-            ? detail.map(d => `${d.loc?.join('.')} - ${d.msg}`).join('; ')
-            : typeof detail === 'object' && detail !== null
-              ? JSON.stringify(detail)
-              : (err.message || 'API Error');
-        throw new Error(msg);
+      try {
+        const resp = await fetch(API + endpoint, { ...config, signal: controller.signal });
+        clearTimeout(timer);
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          const detail = err.detail;
+          const msg = typeof detail === 'string'
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map(d => `${d.loc?.join('.')} - ${d.msg}`).join('; ')
+              : typeof detail === 'object' && detail !== null
+                ? JSON.stringify(detail)
+                : (err.message || 'API Error');
+          throw new Error(msg);
+        }
+        return await resp.json();
+      } catch (err) {
+        clearTimeout(timer);
+        const isNetworkOrTimeout = err.name === 'AbortError' || err.message?.includes('fetch') || err.message?.includes('NetworkError') || err.message?.includes('Failed to fetch');
+        
+        // 마지막 시도이고 네트워크/타임아웃 에러인 경우
+        if (attempt === retries) {
+          if (err.name === 'AbortError') {
+            const timeoutErr = new Error('timeout');
+            timeoutErr.isTimeout = true;
+            throw timeoutErr;
+          }
+          throw err;
+        }
+
+        // 네트워크/타임아웃 에러 시 다음 재시도 전 대기
+        if (isNetworkOrTimeout) {
+          await new Promise(res => setTimeout(res, retryDelayMs));
+        } else {
+          throw err; // HTTP 4xx/5xx 등 명확한 API 에러는 바로 throw
+        }
       }
-      return resp.json();
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === 'AbortError') {
-        const timeoutErr = new Error('timeout');
-        timeoutErr.isTimeout = true;
-        throw timeoutErr;
-      }
-      throw err;
     }
   };
 
@@ -212,20 +232,33 @@ export default function App() {
     if (field === 'min' || field === 'max') { setRuns([]); setAnalysisResult(null); }
   };
 
+  const generateLocalRuns = (factorList) => {
+    const k = factorList.length;
+    const numRuns = Math.pow(2, k);
+    const runsList = [];
+    for (let i = 0; i < numRuns; i++) {
+      const runObj = { id: i + 1, yieldVal: '' };
+      factorList.forEach((f, idx) => {
+        const bit = (i >> (k - 1 - idx)) & 1;
+        runObj[f.key] = bit === 0 ? parseFloat(f.min) : parseFloat(f.max);
+      });
+      runsList.push(runObj);
+    }
+    return runsList;
+  };
+
   const generateRuns = async () => {
     setIsLoading(true);
     try {
-      const d = await apiCall('/api/design/generate', 'POST', { factors }, 60000);
+      const d = await apiCall('/api/design/generate', 'POST', { factors }, 60000, 3, 3000);
       setRuns(d.runs);
       setCurrentTab(2);
     } catch (err) {
-      if (err.isTimeout || err.name === 'AbortError') {
-        alert(t('error.timeout') || '요청 시간이 초과되었습니다. 서버가 시작 중일 수 있습니다. 30초 후 다시 시도해 주세요.');
-      } else if (err.message && err.message.includes('fetch')) {
-        alert(t('error.backendWarmup') || '서버가 시작 중입니다. 잠시 후 다시 시도해 주세요.');
-      } else {
-        alert(t('error.backend') || '백엔드 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.');
-      }
+      console.warn('API 호출 실패 - 로컬 오프라인 엔진으로 자동 전환합니다:', err);
+      // 백엔드 연결 불가 시 로컬 모드로 자동 전환하여 실험계획 생성
+      const localRuns = generateLocalRuns(factors);
+      setRuns(localRuns);
+      setCurrentTab(2);
     }
     setIsLoading(false);
   };
